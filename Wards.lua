@@ -1,17 +1,36 @@
 -- Wards: a Protect ring and a Shell ring drawn in 3D around your own
 -- character while those buffs are on you, and (Test2) an enemybar2-style HP
--- ring above them while you are in combat. A first test of status visuals
--- built on TargetSC's native ring renderer. Author: A.
+-- ring above them while you are in combat, and (Test3) debuff looks stacked
+-- above those. Status visuals built on TargetSC's native ring renderer.
+-- Author: A.
 _addon.name='Wards'
 _addon.author='A'
-_addon.version='0.2.0-test2'
+_addon.version='0.3.0-test3'
 _addon.commands={'wards'}
 
 require('chat')
 local config=require('config')
 local model=require('wards_model')
+local dbf=require('wards_debuffs')
 
-local settings=config.load(model.defaults)
+-- Defaults = rings/HP ring (wards_model) + debuffs (wards_debuffs).
+-- settings_version: 3 = Test3 upgrade done (see below).
+local defaults={settings_version=0}
+for k,v in pairs(model.defaults) do defaults[k]=v end
+for k,v in pairs(dbf.defaults()) do defaults[k]=v end
+local settings=config.load(defaults)
+-- One-time Test3 upgrade: Protect, Shell and the HP ring are now off by
+-- default, but a settings file saved by Test1/Test2 already holds them as
+-- "on" (Windower only uses defaults for missing settings). Turn them off
+-- once; after that the file is version 3 and this never runs again, so
+-- //wards protect on etc. stay as you set them.
+local upgraded=false
+if (tonumber(settings.settings_version) or 0)<3 then
+    settings.protect,settings.shell,settings.hp=false,false,false
+    settings.settings_version=3
+    config.save(settings)
+    upgraded=true
+end
 local addon_path=windower.addon_path:gsub('\\','/')
 
 local function say(text) windower.add_to_chat(207,'Wards: '..text) end
@@ -59,6 +78,9 @@ local fades={protect=model.new_fade(),shell=model.new_fade(),hp=model.new_fade()
 local test={protect=false,shell=false,hp=false}
 local hp_state=model.hp_new()
 local preview_hp=nil -- //wards preview hp <n>: shows the ring with this HP% instead of yours
+local dbf_state=dbf.new_state()
+local preview_debuffs={} -- //wards preview debuff <name>|all: shown without the debuff
+local MAX_ITEMS=64 -- the DLL's ring/arc limit per frame
 local last_clock,next_frame=nil,0
 
 -- The player's own entity, only when it is safe to draw on: logged in, not
@@ -90,7 +112,7 @@ local function draw()
     local me,player=self_mob()
     if not me then
         fades.protect.alpha,fades.shell.alpha,fades.hp.alpha=0,0,0
-        model.hp_reset(hp_state)
+        model.hp_reset(hp_state) dbf.reset(dbf_state)
         clear() return
     end
     local want_p=settings.protect and (test.protect or model.has(player.buffs,model.BUFF.protect))
@@ -107,12 +129,26 @@ local function draw()
         model.hp_step(hp_state,now,dt,settings)
         items=model.hp_items(hp_state,now,settings,radius,model.hp_offset(height,settings),hp_alpha)
     else model.hp_reset(hp_state) end
-    if #rings==0 and #items==0 then clear() return end
+    -- Debuffs: stacked from just above the HP ring's position upward.
+    local debuff_items=dbf.frame(dbf_state,player.buffs,preview_debuffs,now,dt,settings,
+        model.hp_offset(height,settings)+settings.debuff_gap*height,height,radius,dbf.front_degrees(me.facing))
+    if #rings==0 and #items==0 and #debuff_items==0 then clear() return end
     native.begin(me.index,me.id)
+    local sent=0
     for _,a in ipairs(items) do
-        native.arc(a.radius,a.offset,0,a.color,a.color,a.pixels,0,a.start,a.span,0,1,1,1,a.camera)
+        if sent>=MAX_ITEMS then break end
+        native.arc(a.radius,a.offset,0,a.color,a.color,a.pixels,0,a.start,a.span,0,1,1,1,a.camera) sent=sent+1
     end
-    for _,r in ipairs(rings) do native.ring(r.radius,r.offset,0,r.color,r.pixels) end
+    for _,r in ipairs(rings) do
+        if sent>=MAX_ITEMS then break end
+        native.ring(r.radius,r.offset,0,r.color,r.pixels) sent=sent+1
+    end
+    for _,d in ipairs(debuff_items) do
+        if sent>=MAX_ITEMS then break end
+        if d.kind=='ring' then native.ring(d.radius,d.offset,0,d.color,d.pixels)
+        else native.arc(d.radius,d.offset,0,d.lead,d.tail,d.pixels,0,d.start,d.span,d.fade,1,d.curve,d.dir,0) end
+        sent=sent+1
+    end
     native.commit()
 end
 
@@ -138,11 +174,18 @@ local help_lines={
     {'hp <setting> <value>','Tune the HP ring; //wards hp settings lists them.'},
     {'test hp','Show the HP ring out of combat (toggle).'},
     {'preview hp <0-100> | preview off','HP ring at a chosen HP%; lower it to see the trail.'},
+    {'debuffs [on|off]','Debuff looks on yourself (bare = toggle).'},
+    {'debuff list','Each debuff look: on/off, showing now.'},
+    {'debuff <name> [on|off]','One debuff look on or off (bare = toggle).'},
+    {'debuff <name> settings','That debuff\'s settings and values.'},
+    {'debuff <name> <setting> <value>','Tune one debuff look.'},
+    {'debuff layout <setting> <value>','gap, spacing, max, slide, fade_in, fade_out, front.'},
+    {'preview debuff <name|all>','Show a debuff look without the debuff (toggle).'},
     {'defaults','Restore every setting to its default.'},
     {'restart | unload','Reload or unload Wards.'},
 }
 local function help()
-    windower.add_to_chat(0,('Wards '.._addon.version..' - Protect and Shell rings'):color(167))
+    windower.add_to_chat(0,('Wards '.._addon.version..' - debuff, Protect/Shell and HP rings'):color(167))
     for _,line in ipairs(help_lines) do
         windower.add_to_chat(0,('//wards '):color(200)..line[1]:color(207)..(' -> '):color(200)..line[2]:color(0))
     end
@@ -170,6 +213,16 @@ local function status()
     local parts={}
     for _,name in ipairs(hp_order) do parts[#parts+1]=name..'='..tostring(settings['hp_'..name]) end
     say('hp: '..table.concat(parts,' '))
+    local showing,parts2={},{}
+    for _,name in ipairs(dbf.order) do
+        if dbf_state.entries[name] then showing[#showing+1]=name end
+        if settings[name]==false then parts2[#parts2+1]=name end
+    end
+    say(('debuffs=%s showing: %s; off: %s; preview: %s'):format(tostring(settings.debuffs),
+        #showing>0 and table.concat(showing,' ') or 'none',#parts2>0 and table.concat(parts2,' ') or 'none',
+        next(preview_debuffs) and table.concat((function() local l={} for _,n in ipairs(dbf.order) do if preview_debuffs[n] then l[#l+1]=n end end return l end)(),' ') or 'off'))
+    say(('debuff layout: gap=%s spacing=%s max=%s slide=%s fade_in=%s fade_out=%s front=%s'):format(settings.debuff_gap,
+        settings.debuff_spacing,settings.debuff_max,settings.debuff_slide,settings.debuff_fade_in,settings.debuff_fade_out,settings.debuff_front))
     if native then say(native.status()) end
 end
 local ranges={height={.25,3},scale={.25,3},level={0,1.5},gap={0,.5},ground={0,1},opacity={0,1},glow={0,3},width={1,8}}
@@ -228,9 +281,20 @@ end
 local handlers={}
 handlers.hp=hp_command
 handlers.preview=function(kind,value)
-    if kind=='off' then preview_hp=nil say('Preview off.') return end
+    if kind=='off' then preview_hp=nil preview_debuffs={} say('Preview off.') return end
+    if kind=='debuff' then
+        if value=='all' then
+            local any=false for _,n in ipairs(dbf.order) do any=any or not preview_debuffs[n] end
+            for _,n in ipairs(dbf.order) do preview_debuffs[n]=any or nil end
+            say(any and 'Preview: all debuff looks (//wards preview off ends it).' or 'Preview: debuffs off.') return
+        end
+        local name=dbf.name_for(value)
+        if not name then say('Use //wards preview debuff <'..table.concat(dbf.order,'|')..'|all>.') return end
+        preview_debuffs[name]=not preview_debuffs[name] or nil
+        say(('Preview %s %s.'):format(name,preview_debuffs[name] and 'on' or 'off')) return
+    end
     local n=tonumber(value)
-    if kind~='hp' or not n or n<0 or n>100 then say('Use //wards preview hp <0-100> or //wards preview off.') return end
+    if kind~='hp' or not n or n<0 or n>100 then say('Use //wards preview hp <0-100>, //wards preview debuff <name|all> or //wards preview off.') return end
     if preview_hp==nil then model.hp_reset(hp_state) end
     preview_hp=n
     say(('Preview: HP ring at %d%% (lower it again to watch the trail; //wards preview off ends it).'):format(n))
@@ -267,8 +331,68 @@ handlers.fade=function(which,value)
     if (which~='in' and which~='out') or not n or n<.05 or n>3 then say('Use //wards fade in|out <0.05-3>.') return end
     settings['fade_'..which]=n config.save(settings) say(('fade %s = %.2fs'):format(which,n))
 end
+-- Debuff commands --------------------------------------------------------------
+local layout_ranges={gap={0,2},spacing={0,1},max={1,12},slide={.01,3},fade_in={.05,3},fade_out={.05,3},front={-360,360}}
+local function set_debuff_value(name,key,args)
+    local defaults_r=dbf.recipes[name].defaults
+    local default=defaults_r[key]
+    if default==nil then
+        local keys={} for k in pairs(defaults_r) do keys[#keys+1]=k end table.sort(keys)
+        say(('%s has no setting %s. Settings: %s.'):format(name,tostring(key),table.concat(keys,', '))) return
+    end
+    local skey=name..'_'..key
+    if type(default)=='number' then
+        local n=tonumber(args[1])
+        if not n or n<-3600 or n>3600 then say(('Use //wards debuff %s %s <number>.'):format(name,key)) return end
+        settings[skey]=n
+    elseif key=='shape' then
+        if args[1]~='arc' and args[1]~='ring' then say(('Use //wards debuff %s shape arc|ring.'):format(name)) return end
+        settings[skey]=args[1]
+    else
+        local value=table.concat(args,'')
+        if not dbf.color(value) then say('Use a color name ('..'black, white, earth, ice, light, darkness, red, yellow'..') or R,G,B.') return end
+        settings[skey]=value:lower()
+    end
+    config.save(settings) say(('%s %s = %s'):format(name,key,tostring(settings[skey])))
+end
+handlers.debuffs=function(value)
+    local v=onoff(value,'debuffs') if v==nil then return end
+    settings.debuffs=v config.save(settings) say('Debuff looks '..(v and 'on' or 'off')..'.')
+end
+handlers.debuff=function(word,...)
+    local args={...}
+    if word=='list' or word==nil then
+        for _,n in ipairs(dbf.order) do
+            say(('%s: %s%s (status %s)'):format(n,settings[n]==false and 'off' or 'on',
+                dbf_state.entries[n] and ', showing' or '',table.concat(dbf.recipes[n].ids,'/')))
+        end return
+    end
+    if word=='layout' then
+        local key=args[1] local r=layout_ranges[key or ''] local n=tonumber(args[2])
+        if not r or not n or n<r[1] or n>r[2] then say('Use //wards debuff layout gap|spacing|max|slide|fade_in|fade_out|front <value>.') return end
+        settings['debuff_'..key]=n config.save(settings) say(('debuff %s = %s'):format(key,n)) return
+    end
+    local name=dbf.name_for(word)
+    if not name then say('Unknown debuff '..tostring(word)..'. //wards debuff list shows them.') return end
+    local first=args[1]
+    if first==nil or first=='on' or first=='off' then
+        if first==nil then settings[name]=settings[name]==false else settings[name]=first=='on' end
+        config.save(settings) say(('%s look %s.'):format(name,settings[name] and 'on' or 'off')) return
+    end
+    if first=='settings' then
+        local keys={} for k in pairs(dbf.recipes[name].defaults) do keys[#keys+1]=k end table.sort(keys)
+        local parts={} for _,k in ipairs(keys) do
+            local v=settings[name..'_'..k] if v==nil then v=dbf.recipes[name].defaults[k] end
+            parts[#parts+1]=k..'='..tostring(v)
+        end
+        say(name..': '..table.concat(parts,' ')) return
+    end
+    table.remove(args,1)
+    set_debuff_value(name,first,args)
+end
 handlers.defaults=function()
-    for k,v in pairs(model.defaults) do settings[k]=v end
+    for k,v in pairs(defaults) do settings[k]=v end
+    settings.settings_version=3
     config.save(settings) say('All settings restored to defaults.')
 end
 for name in pairs(ranges) do handlers[name]=function(value) set_number(name,value) end end
@@ -288,8 +412,11 @@ windower.register_event('addon command',function(command,...)
     help()
 end)
 windower.register_event('prerender',draw)
-windower.register_event('load',function() if settings.enabled then start_renderer() end end)
+windower.register_event('load',function()
+    if settings.enabled then start_renderer() end
+    if upgraded then say('Test3: Protect, Shell and HP rings are now off by default (//wards protect on, shell on, hp on).') end
+end)
 windower.register_event('zone change','logout',function()
-    fades.protect.alpha,fades.shell.alpha,fades.hp.alpha=0,0,0 model.hp_reset(hp_state) clear()
+    fades.protect.alpha,fades.shell.alpha,fades.hp.alpha=0,0,0 model.hp_reset(hp_state) dbf.reset(dbf_state) clear()
 end)
 windower.register_event('unload',function() clear() if native then native.stop() end end)

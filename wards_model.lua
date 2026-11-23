@@ -24,8 +24,8 @@ M.colors={
 -- game with a //wards command and is saved in data/settings.xml.
 M.defaults={
     enabled=true,
-    protect=true,          -- draw the Protect ring (on/off)
-    shell=true,            -- draw the Shell ring (on/off)
+    protect=false,         -- draw the Protect ring (on/off; off by default since Test3)
+    shell=false,           -- draw the Shell ring (on/off; off by default since Test3)
     protect_color='element', -- element | icon | iconlight | R,G,B
     shell_color='element',
     height=0.66,           -- same meaning as TargetSC's `height` (default .66)
@@ -39,7 +39,7 @@ M.defaults={
     fade_in=0.3,           -- seconds to fade in when the buff lands
     fade_out=0.6,          -- seconds to fade out when the buff wears off
     -- Test2 HP ring (enemybar2 style), above Protect, shown in combat only.
-    hp=true,               -- draw the HP ring (on/off)
+    hp=false,              -- draw the HP ring (on/off; off by default since Test3)
     hp_gap=0.08,           -- distance above the Protect ring, fraction of the height span
     hp_color='pink',       -- pink arc core (enemybar2 main bar pink 255,149,151)
     hp_glow_color='pinkwhite', -- glow under the pink arc (255,215,218)

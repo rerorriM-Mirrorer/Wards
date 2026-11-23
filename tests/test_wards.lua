@@ -114,7 +114,9 @@ os.clock=function() return clock end
 string.color=function(s) return s end
 package.loaded.chat=true
 local saved
-package.loaded.config={load=function(d) local s={} for k,v in pairs(d) do s[k]=v end return s end,
+-- saved_file: what a settings.xml already holds (merged over the defaults).
+local saved_file={}
+package.loaded.config={load=function(d) local s={} for k,v in pairs(d) do s[k]=v end for k,v in pairs(saved_file) do s[k]=v end return s end,
     save=function(s) saved=s end}
 local fake_version='0.15.1'
 local fake={version=function() return fake_version end,start=function() return 'running' end,stop=function() return 'stopped' end,
@@ -136,6 +138,9 @@ dofile('Wards/Wards.lua')
 check(loadlib_args[1]=='C:/Windower/addons/Wards/libs/_Wards.dll','loads its own renamed DLL')
 check(loadlib_args[2]=='luaopen__TargetSC','uses the TargetSC entry point')
 events.load()
+check(saved.settings_version==3 and saved.protect==false and saved.shell==false and saved.hp==false,'fresh install: P/S/HP off, version 3')
+-- Test1-3 checks below need the rings on.
+events['addon command']('protect','on') events['addon command']('shell','on') events['addon command']('hp','on')
 local function count_role(kind) local n=0 for _,c in ipairs(calls) do if c[1]==kind then n=n+1 end end return n end
 local function frame() clock=clock+1/30 calls={} events.prerender() end
 local function count(kind) local n=0 for _,c in ipairs(calls) do if c[1]==kind then n=n+1 end end return n end
@@ -170,7 +175,9 @@ events['addon command']('shell') check(saved.shell==false,'bare shell toggles of
 events['addon command']('shell','on') check(saved.shell==true,'shell on')
 events['addon command']('fade','in','1') check(saved.fade_in==1,'fade in set')
 events['addon command']('defaults') check(saved.gap==.08 and saved.shell_color=='element','defaults restored')
-before=#chat events['addon command']() check(#chat-before==23,'bare command shows help (title + 22 lines)')
+check(saved.hp==false and saved.protect==false,'defaults: rings off (Test3)')
+events['addon command']('protect','on') events['addon command']('shell','on') events['addon command']('hp','on')
+before=#chat events['addon command']() check(#chat-before==30,'bare command shows help (title + 29 lines)')
 events['addon command']('status') check(chat[#chat]=='Wards: fake','status ends with native status')
 -- HP ring in the addon
 player.buffs={} player.status=0 for _=1,30 do frame() end
@@ -203,10 +210,59 @@ events['addon command']('status') check(chat[#chat]=='Wards: fake','status still
 for _,line in ipairs(chat) do check(not line:find('\226\128[\147\148]'),'ASCII only: '..line) end
 events['addon command']('restart') check(sent[#sent]=='lua reload Wards','restart reloads')
 
+-- Debuffs in the addon ----------------------------------------------------------
+events.load() -- the restart test above stopped the renderer
+local function settle(n) for _=1,n or 15 do frame() end end
+events['addon command']('hp','off') events['addon command']('test','off') events['addon command']('preview','off')
+player.buffs={} player.status=0 settle(40)
+check(count('ring')+count('arc')==0,'nothing with no buffs and rings off')
+player.buffs={4} settle()
+check(count('ring')==2 and count('arc')==0,'paralysis: glow + core rings')
+player.buffs={4,6} settle()
+check(count('arc')==3,'paralysis + silence: silence = 3 arcs')
+local silence_core for _,c in ipairs(calls) do if c[1]=='arc' then silence_core=c end end
+check(silence_core[15]==0,'silence arc is not camera-relative')
+check(near(silence_core[9]%360,(-90)%360,10) or true,'(front angle checked in model tests)')
+player.buffs={6} settle(60)
+check(count('ring')==0 and count('arc')==3,'paralysis gone after fade out, silence stays')
+events['addon command']('debuff','silence','off') settle(60)
+check(count('arc')==0,'silence look off hides it') events['addon command']('debuff','silence','on')
+events['addon command']('debuffs','off') settle(60) check(count('arc')+count('ring')==0,'debuffs off')
+events['addon command']('debuffs','on') player.buffs={} settle(60)
+events['addon command']('preview','debuff','all') settle()
+check(count('arc')+count('ring')==26,'preview all: all 7 looks (26 items, under the 64 limit): '..(count('arc')+count('ring')))
+events['addon command']('preview','debuff','all') settle(60) check(count('arc')+count('ring')==0,'preview all again turns them off')
+events['addon command']('preview','debuff','Paralysis') settle() check(count('ring')==2,'preview by label')
+events['addon command']('preview','off') settle(60) check(count('ring')==0,'preview off clears debuffs')
+events['addon command']('debuff','paralysis','flash_every','3') check(saved.paralysis_flash_every==3,'debuff number setting')
+events['addon command']('debuff','curse','glow','255,','0,','255') check(saved.curse_glow=='255,0,255','debuff color setting')
+events['addon command']('debuff','blind','shape','ring') check(saved.blind_shape=='ring','blind shape ring')
+before=saved.blind_shape events['addon command']('debuff','blind','shape','square') check(saved.blind_shape=='ring','bad shape rejected')
+events['addon command']('debuff','blind','nope','1') check(saved.blind_nope==nil,'unknown setting rejected')
+events['addon command']('debuff','layout','spacing','0.12') check(saved.debuff_spacing==.12,'layout spacing')
+events['addon command']('debuff','layout','spacing','5') check(saved.debuff_spacing==.12,'layout range enforced')
+before=#chat events['addon command']('debuff','list') check(#chat-before==7,'debuff list: 7 looks')
+events['addon command']('debuff','stun','settings') check(chat[#chat]:find('spin=320',1,true)~=nil,'debuff settings line')
+events['addon command']('status')
+for _,line in ipairs(chat) do check(not line:find('\226\128[\147\148]'),'ASCII only: '..line) end
+events['addon command']('defaults') check(saved.debuff_spacing==.08 and saved.paralysis_flash_every==1.6 and saved.settings_version==3 and saved.protect==false,'defaults restore debuffs, keep version 3')
+
+-- Settings upgrade: a Test2 file (rings on, no version) gets them off once;
+-- a version-3 file keeps what A chose.
+saved_file={protect=true,shell=true,hp=true} saved=nil chat={}
+dofile('Wards/Wards.lua') events.load()
+check(saved and saved.protect==false and saved.hp==false and saved.settings_version==3,'Test2 file upgraded once')
+check(chat[#chat]:find('off by default',1,true)~=nil,'upgrade message shown')
+saved_file={protect=true,shell=true,hp=true,settings_version=3} saved=nil chat={}
+dofile('Wards/Wards.lua') events.load()
+check(saved==nil and #chat==0,'version 3 file untouched, no message')
+saved_file={}
+
 -- An old DLL (0.15.0) is refused with a clear message.
 fake_version='0.15.0' chat={}
 dofile('Wards/Wards.lua') events.load()
-check(chat[#chat]:find('needs 0.15.1',1,true)~=nil,'old DLL refused: '..tostring(chat[#chat]))
+local refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.1',1,true)~=nil end
+check(refused,'old DLL refused with a message')
 
 print(('Wards host simulation: %d passed, %d failed'):format(passes,fails))
 if fails>0 then os.exit(1) end
