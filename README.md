@@ -1,10 +1,10 @@
 # Wards
 
-Wards draws a ring in the 3D scene around your own character while Protect or Shell is on you, and an enemybar2-style HP ring above them while you're in combat. A blue Protect ring sits where TargetSC's sky ring rests, and a green Shell ring sits just below it. Each ring fades in when the buff lands and fades out when it wears off. This is the first test of a larger idea: status visuals drawn on characters with TargetSC's ring renderer.
+Wards draws status visuals in the 3D scene around your own character. Since Test3 that means **debuffs**: each debuff has its own look (color, glow and motion), and they stack upward above the HP ring's position in the order they landed. The Protect/Shell rings and the enemybar2-style HP ring are still there, but they're **off by default** (`//wards protect on`, `//wards shell on`, `//wards hp on`). A blue Protect ring sits where TargetSC's sky ring rests, and a green Shell ring sits just below it. Each ring fades in when the buff lands and fades out when it wears off. This is the first test of a larger idea: status visuals drawn on characters with TargetSC's ring renderer.
 
 ## Install
 
-Copy the `Wards` folder into `Windower/addons/`, so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
+Copy the `Wards` folder into `Windower/addons/`, so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
 
 `libs/_Wards.dll` is TargetSC's renderer, built from the same source. It's version 0.15.1, which adds arcs that turn to face the camera, so it's one step ahead of TargetSC's own 0.15.0. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test2 needs 0.15.1; with an older `_Wards.dll`, `//wards status` tells you to replace it.
 
@@ -32,6 +32,13 @@ Copy the `Wards` folder into `Windower/addons/`, so you have `addons/Wards/Wards
 | `//wards hp <setting> <value>` | Tunes the HP ring (see below). `//wards hp settings` lists them. |
 | `//wards test hp` | Shows the HP ring out of combat (toggle). `test off` clears every test. |
 | `//wards preview hp <0-100>` | Shows the HP ring at that HP%, even out of combat. Lower it again to watch the trail. `//wards preview off` ends it. |
+| `//wards debuffs [on\|off]` | Debuff looks on or off (bare = toggle). |
+| `//wards debuff list` | Each look: on/off, showing now, status IDs. |
+| `//wards debuff <name> [on\|off]` | One look on or off (bare = toggle). |
+| `//wards debuff <name> settings` | That look's settings and current values. |
+| `//wards debuff <name> <setting> <value>` | Tunes one look, e.g. `//wards debuff paralysis flash_every 2`. |
+| `//wards debuff layout <setting> <value>` | `gap`, `spacing`, `max`, `slide`, `fade_in`, `fade_out`, `front` (see below). |
+| `//wards preview debuff <name\|all>` | Shows a look without having the debuff (toggle). `//wards preview off` ends every preview. |
 | `//wards defaults` | Restores every setting. |
 | `//wards restart` / `unload` | Reloads or unloads Wards. |
 
@@ -46,9 +53,40 @@ Settings are saved in `Wards/data/settings.xml`.
 | `iconlight` | 127,127,255 | 127,191,127 | the lighter edge tint in those same icons (halfway to white) |
 | `R,G,B` | any | any | your own color, e.g. `//wards color shell 90,255,160` |
 
+## Debuffs
+
+Each debuff is drawn as a ring (or arc) at its own height. The first one sits a little above where the HP ring would be, and each new debuff stacks above the last in the order it landed. When one wears off, it fades out in place, and then the ones above it glide down to close the gap. Silence and Blind are arcs in **front of your character** (the way you face, not the camera).
+
+| Look | Status | What it does |
+| --- | --- | --- |
+| `paralysis` | Paralysis (4) | Bright yellow ring that buzzes (tiny size jitter). Its yellow glow flashes ice blue (TargetSC's Ice color) at irregular moments, sometimes twice, like electricity. |
+| `silence` | Silence (6) | Near-white green half arc in front of you. Its glow is white in the middle and red at both ends, and it sways gently back and forth. |
+| `curse` | Curse (9, 20) | Purple ring. Its glow is a white-to-purple gradient that turns around the ring like a shimmer and breathes slightly. |
+| `blind` | Blindness (5) | Murky black, like TargetSC's Darkness rings: a black core under layers of dark violet haze that slowly breathe. An arc in front by default; `//wards debuff blind shape ring` for the full ring. |
+| `sleep` | Sleep (2, 19) | Lavender ring with a pale-blue glow, breathing slowly. |
+| `stun` | Stun (10) | Placeholder look until you design one: three short bright arcs orbiting fast, bobbing a little. |
+| `slow` | Slow (13) | Comet arcs turning counterclockwise. Each cycle flashes bright orange, fades through Scission earth-amber to deep blue, turning fast at the flash and slowing as it fades. |
+
+Layout settings (`//wards debuff layout <setting> <value>`):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `gap` | 0.10 | First debuff's distance above the HP ring position (fraction of the height span) |
+| `spacing` | 0.08 | Distance between stacked debuffs |
+| `max` | 8 | Most looks drawn at once (oldest first) |
+| `slide` | 0.25 | Seconds to glide to a new slot |
+| `fade_in` / `fade_out` | 0.3 / 0.6 | Seconds to appear / disappear |
+| `front` | 0 | Degrees added to your facing for the front arcs (try 180 if they appear behind you) |
+
+Every look's own settings are listed by `//wards debuff <name> settings` and can be changed the same way. Colors take `R,G,B` or a name: `black`, `white`, `earth`, `ice`, `light`, `darkness`, `red`, `yellow`. Some examples:
+- `//wards debuff curse spin 60`
+- `//wards debuff silence sway 4`
+- `//wards debuff slow cycle 4`
+- `//wards debuff sleep glow 200,220,255`
+
 ## HP ring
 
-The HP ring sits above the Protect ring and appears only in combat (engaged, or Windower's in-combat flag), fading in and out. A semi-opaque black circle runs all the way around. On top of it, a pink arc (enemybar2's main-bar pink) with a pink-white glow shows your HP%: the whole circle at 100%, a thin sliver at 2-3%. The arc is centered on the side of the circle facing the camera and shrinks evenly from both ends, so the last sliver is always the part you see.
+The HP ring (off by default since Test3; `//wards hp on`) sits above the Protect ring and appears only in combat (engaged, or Windower's in-combat flag), fading in and out. A semi-opaque black circle runs all the way around. On top of it, a pink arc (enemybar2's main-bar pink) with a pink-white glow shows your HP%: the whole circle at 100%, a thin sliver at 2-3%. The arc is centered on the side of the circle facing the camera and shrinks evenly from both ends, so the last sliver is always the part you see.
 
 When you lose HP, the lost part turns red (enemybar2's trail color). It holds for 2 seconds, then drains into the pink over half a second. Below 50%, a red glow pulses on the circle, getting stronger as HP falls. At 10% and below, the pink arc flashes toward white. Ghost hits, healing and death effects come later.
 
@@ -79,6 +117,8 @@ The HP ring sits `hp gap x span` above Protect.
 Wards hides itself while you're logged out, in cutscenes and events, and while zoning.
 
 ## Changelog
+
+- **0.3.0-test3** (2026-11-23): Debuff looks on yourself: Paralysis, Silence, Curse, Blind, Sleep, Stun (placeholder look) and Slow, stacked above the HP ring position in landing order with fades and gliding slots; Silence and Blind face your character's front. `//wards debuffs`, `debuff ...`, `preview debuff`. Protect, Shell and the HP ring are now off by default (a one-time settings upgrade turns them off in an existing settings file). Same renderer as Test2.
 
 - **0.2.0-test2** (2026-11-23): HP ring above Protect, shown in combat only: black circle, pink arc with pink-white glow centered toward the camera, red trail (2 s hold, 0.5 s drain), low-HP pulse, 10% flash, `//wards hp ...` tuning, `test hp`, `preview hp`. Renderer 0.15.1 (camera-facing arcs).
 
