@@ -1,0 +1,28 @@
+name: Wards host checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua 5.1 and MinGW
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.1 g++-mingw-w64-i686 binutils-mingw-w64-i686
+      - name: Parse and simulate
+        run: |
+          for f in *.lua tests/*.lua; do luac5.1 -p "$f"; done
+          lua5.1 tests/test_wards.lua
+          lua5.1 tests/test_debuffs.lua
+      - name: Native 0.15.1 builds from native/; shipped DLL is a 0.15.1 renderer
+        run: |
+          i686-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -shared -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp -o /tmp/_Wards.dll native/TargetSC.cpp native/exports.def -ld3d8
+          g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/property native/tests/test_property.cpp && /tmp/property
+          g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/stroke native/tests/test_stroke.cpp && /tmp/stroke
+          i686-w64-mingw32-objdump -p libs/_Wards.dll | grep -q 'luaopen__TargetSC'
+          grep -aq 'TargetSC 0.15.1' libs/_Wards.dll

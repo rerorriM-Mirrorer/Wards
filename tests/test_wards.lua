@@ -1,9 +1,9 @@
 -- Host simulation for Wards (Lua 5.1). Run from the repo root:
---   lua5.1 Wards/tests/test_wards.lua
+--   lua5.1 tests/test_wards.lua
 -- Stubs Windower, config, chat and the native DLL; checks the model math,
 -- buff detection, fades, colors, commands and what reaches native.ring.
 -- This is not an FFXI test: it cannot show how the rings look in game.
-package.path='Wards/?.lua;'..package.path
+package.path='./?.lua;'..package.path
 local fails,passes=0,0
 local function check(cond,msg) if cond then passes=passes+1 else fails=fails+1 print('FAIL: '..msg) end end
 local function near(a,b,e) return math.abs(a-b)<=(e or 1e-6) end
@@ -134,7 +134,7 @@ windower={addon_path='C:\\Windower\\addons\\Wards\\',
         get_mob_by_target=function(t) return t=='me' and me or nil end,
         get_mob_by_index=function(i) return i==me.index and me or nil end}}
 _addon={}
-dofile('Wards/Wards.lua')
+dofile('Wards.lua')
 check(loadlib_args[1]=='C:/Windower/addons/Wards/libs/_Wards.dll','loads its own renamed DLL')
 check(loadlib_args[2]=='luaopen__TargetSC','uses the TargetSC entry point')
 events.load()
@@ -250,17 +250,17 @@ events['addon command']('defaults') check(saved.debuff_spacing==.08 and saved.pa
 -- Settings upgrade: a Test2 file (rings on, no version) gets them off once;
 -- a version-3 file keeps what A chose.
 saved_file={protect=true,shell=true,hp=true} saved=nil chat={}
-dofile('Wards/Wards.lua') events.load()
+dofile('Wards.lua') events.load()
 check(saved and saved.protect==false and saved.hp==false and saved.settings_version==3,'Test2 file upgraded once')
 check(chat[#chat]:find('off by default',1,true)~=nil,'upgrade message shown')
 saved_file={protect=true,shell=true,hp=true,settings_version=3} saved=nil chat={}
-dofile('Wards/Wards.lua') events.load()
+dofile('Wards.lua') events.load()
 check(saved==nil and #chat==0,'version 3 file untouched, no message')
 saved_file={}
 
 -- An old DLL (0.15.0) is refused with a clear message.
 fake_version='0.15.0' chat={}
-dofile('Wards/Wards.lua') events.load()
+dofile('Wards.lua') events.load()
 local refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.1',1,true)~=nil end
 check(refused,'old DLL refused with a message')
 
