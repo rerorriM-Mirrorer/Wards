@@ -1,12 +1,12 @@
 # Wards
 
-Wards draws a ring in the 3D scene around your own character while Protect or Shell is on you. A blue Protect ring sits where TargetSC's sky ring rests, and a green Shell ring sits just below it. Each ring fades in when the buff lands and fades out when it wears off. This is the first test of a larger idea: status visuals drawn on characters with TargetSC's ring renderer.
+Wards draws a ring in the 3D scene around your own character while Protect or Shell is on you, and an enemybar2-style HP ring above them while you're in combat. A blue Protect ring sits where TargetSC's sky ring rests, and a green Shell ring sits just below it. Each ring fades in when the buff lands and fades out when it wears off. This is the first test of a larger idea: status visuals drawn on characters with TargetSC's ring renderer.
 
 ## Install
 
 Copy the `Wards` folder into `Windower/addons/`, so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
 
-`libs/_Wards.dll` is TargetSC's renderer (native 0.15.0), copied byte for byte and renamed. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed.
+`libs/_Wards.dll` is TargetSC's renderer, built from the same source. It's version 0.15.1, which adds arcs that turn to face the camera, so it's one step ahead of TargetSC's own 0.15.0. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test2 needs 0.15.1; with an older `_Wards.dll`, `//wards status` tells you to replace it.
 
 ## Commands
 
@@ -28,6 +28,10 @@ Copy the `Wards` folder into `Windower/addons/`, so you have `addons/Wards/Wards
 | `//wards glow <0-3>` | Glow strength, 0 = no glow (default 1). |
 | `//wards width <1-8>` | Core line width in pixels (default 2). |
 | `//wards fade in\|out <0.05-3>` | Fade seconds (defaults: in 0.3, out 0.6). |
+| `//wards hp [on\|off]` | Shows or hides the HP ring (bare = toggle). |
+| `//wards hp <setting> <value>` | Tunes the HP ring (see below). `//wards hp settings` lists them. |
+| `//wards test hp` | Shows the HP ring out of combat (toggle). `test off` clears every test. |
+| `//wards preview hp <0-100>` | Shows the HP ring at that HP%, even out of combat. Lower it again to watch the trail. `//wards preview off` ends it. |
 | `//wards defaults` | Restores every setting. |
 | `//wards restart` / `unload` | Reloads or unloads Wards. |
 
@@ -42,12 +46,40 @@ Settings are saved in `Wards/data/settings.xml`.
 | `iconlight` | 127,127,255 | 127,191,127 | the lighter edge tint in those same icons (halfway to white) |
 | `R,G,B` | any | any | your own color, e.g. `//wards color shell 90,255,160` |
 
+## HP ring
+
+The HP ring sits above the Protect ring and appears only in combat (engaged, or Windower's in-combat flag), fading in and out. A semi-opaque black circle runs all the way around. On top of it, a pink arc (enemybar2's main-bar pink) with a pink-white glow shows your HP%: the whole circle at 100%, a thin sliver at 2-3%. The arc is centered on the side of the circle facing the camera and shrinks evenly from both ends, so the last sliver is always the part you see.
+
+When you lose HP, the lost part turns red (enemybar2's trail color). It holds for 2 seconds, then drains into the pink over half a second. Below 50%, a red glow pulses on the circle, getting stronger as HP falls. At 10% and below, the pink arc flashes toward white. Ghost hits, healing and death effects come later.
+
+| `//wards hp ...` | Default | Meaning |
+| --- | --- | --- |
+| `gap` | 0.08 | Distance above the Protect ring, as a fraction of the height span |
+| `color` / `glow color` | pink / pinkwhite | Pink core (255,149,151) and its glow (255,215,218) |
+| `opacity` / `width` | 1 / 2 | Pink core opacity and pixel width |
+| `glow` / `glow opacity` | 1 / 0.35 | Glow strength (width +4 px x glow) and opacity |
+| `back opacity` / `back width` | 0.45 / 8 | The black circle |
+| `motion` | 0.18 | Seconds for the pink arc to follow a new HP% |
+| `trail` | on | Red trail over just-lost HP |
+| `trail color` / `trail opacity` / `trail width` | trail / 1 / 4 | Trail look (trail = 167,57,96) |
+| `trail hold` / `trail slide` | 2 / 0.5 | Seconds before the trail drains, and how long it drains |
+| `pulse` | on | Low-HP red pulse below 50% |
+| `pulse color` / `pulse opacity` / `pulse period` | red / 0.5 / 0.5 | Pulse look (red = 220,40,60; enemybar2's main bar pulses every 0.1 s) |
+| `flash` / `flash period` | on / 0.25 | Flash toward white at 10% and below |
+| `fade in` / `fade out` | 0.3 / 0.8 | Seconds to appear when combat starts and to fade out when it ends |
+
+Colors take `pink`, `pinkwhite`, `trail`, `red`, `black`, `white` or `R,G,B`. Examples: `//wards hp trail hold 3`, `//wards hp glow color 255,230,235`, `//wards hp pulse off`.
+
 ## How it decides where to draw
 
 Sizes come from the same formula as TargetSC (`resonance.dimensions`): your model's size sets the ring radius and the height span, multiplied by `scale` and `height`. Protect sits at `ground + level x span` above your feet. That is exactly where TargetSC's sky ring rests in the grounded layout, so the defaults line up with what you already know. Shell sits `gap x span` below it. Like TargetSC's rings, each one is a soft glow line (width + 4 px, 24% alpha) under a thin bright core line.
 
+The HP ring sits `hp gap x span` above Protect.
+
 Wards hides itself while you're logged out, in cutscenes and events, and while zoning.
 
 ## Changelog
+
+- **0.2.0-test2** (2026-11-23): HP ring above Protect, shown in combat only: black circle, pink arc with pink-white glow centered toward the camera, red trail (2 s hold, 0.5 s drain), low-HP pulse, 10% flash, `//wards hp ...` tuning, `test hp`, `preview hp`. Renderer 0.15.1 (camera-facing arcs).
 
 - **0.1.0-test1** (2026-11-23): First test. Protect and Shell rings on your own character, fades, color choices (element / icon / iconlight / R,G,B), placement and look tunables, test mode.
