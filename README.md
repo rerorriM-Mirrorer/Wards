@@ -4,9 +4,9 @@ Wards draws status visuals in the 3D scene around your own character. Since Test
 
 ## Install
 
-Copy the `Wards` folder into `Windower/addons/`, so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
+Copy the `Wards` folder into `Windower/addons/` (or download this repository and name its folder `Wards`), so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
 
-`libs/_Wards.dll` is TargetSC's renderer, built from the same source. It's version 0.15.1, which adds arcs that turn to face the camera, so it's one step ahead of TargetSC's own 0.15.0. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test2 needs 0.15.1; with an older `_Wards.dll`, `//wards status` tells you to replace it.
+`libs/_Wards.dll` is TargetSC's renderer, built from the same source (a copy lives in `native/`). It's version 0.15.1, which adds arcs that turn to face the camera, so it's one step ahead of TargetSC's own 0.15.0. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test2 needs 0.15.1; with an older `_Wards.dll`, `//wards status` tells you to replace it.
 
 ## Commands
 

@@ -2,6 +2,17 @@
 
 ## Current Development Status — 2026-11-23 (America/Chicago)
 
+- Repo/branch: `rerorriM-Mirrorer/Wards` `main` (new repository). Docs/structure only; no addon code change since Test3.
+- installed_base: Test3 (Skillchains-branch SHA `d11d6b5`, here `abadbbb` after the history move; A ran it 10:23, Live: "such cool effects", especially Paralysis's buzz and Stun's tilting orbit).
+- Changes: Wards history moved here from `rerorriM-Mirrorer/Skillchains` `development/wards-protect-shell` with `git subtree split --prefix=Wards` (that branch was never pushed). Added canon `AGENTS.md` (shared 2026-11-21.3 + REPO block) and `WORKFLOW.md` (2026-11-20.1) from ffxi-NPCmirror main `45ae2eb`; `native/` = renderer source 0.15.1 (TargetSC + SceneHook); tests run from the repo root; CI `.github/workflows/wards-testing.yml`.
+- Checks: `luac5.1 -p` all .lua PASS; `lua5.1 tests/test_wards.lua` 312/312; `lua5.1 tests/test_debuffs.lua` 37/37; native/ builds -Werror clean; test_property + test_stroke PASS. Host only.
+- Pending (A): front arcs in front of the character? Slow counterclockwise?
+- Next (A, 10:23): a fixed top-to-bottom debuff order; anatomical anchors per race (Blind at eye level, Silence at mouth level...). Then the remaining designs (see the Test3 block and the project handoff), party members, enemy HP ring.
+
+---
+
+## Current Development Status — 2026-11-23 (America/Chicago)
+
 - Repo/branch: `rerorriM-Mirrorer/Skillchains` `development/wards-protect-shell`. Stack: `master@9476226` -> `development/targetsc-mb-rise-gradient@8624248` -> `development/targetsc-level4-collapse@446362f` -> `development/targetsc-lit-disc@26438f2` -> `development/wards-protect-shell`. Not pushed (push access denied; patches delivered).
 - installed_base: Test2 `2143cce` (A's word 08:08 after Test2: "really cool but not so useful yet"; Test1 Protect/Shell Live 07:13). Package `Wards-0.3.0-Test3.zip` = Wards.lua, wards_model.lua, wards_debuffs.lua (new), README.md. **DLL unchanged (0.15.1): no need to close the game**, `//lua reload wards` is enough.
 - A's design (09:21, 09:31): WHM-curable debuffs first; Protect/Shell/HP off by default; stack starts right above the HP ring; first set Paralysis, Silence, Curse, Blind, Sleep, Stun, Slow; Silence (and Blind) are arcs in front of the character's facing, not the camera; one-ring-with-arcs idea kept for the Erase group later.
