@@ -16,7 +16,8 @@ callbacks instead.
 ## What you get
 
 - Load and unload addons in any order, as often as you like.
-- No module pinning, so no DLL file is locked and `//lua reload` works normally.
+- No module pinning (unless the thunk page cannot be set up), so no DLL file is
+  locked and `//lua reload` works normally, even for the addon driving the frame.
 - Every registered addon draws in the same frame; output composites naturally.
 - Participants never see or reason about each other.
 
@@ -113,6 +114,34 @@ owner_ptr == trampoline        nobody is drawing; draw_scene behaves
 owner_ptr == a module's stub   that module drives the frame: it calls the
                                trampoline, then every registered callback
 ```
+
+### Owner thunks (2026-11-23, A)
+
+The first version pointed `owner_ptr` at the owning module's own stub, which
+*called* the trampoline and expected to return into itself. Windower runs addon
+Lua inside `draw_scene`, so `//lua unload` or `//lua reload` of the owning addon
+(or the addon erroring and being unloaded) could free that DLL while the stub's
+return address was still on the stack. The return then landed in unmapped
+memory: Event Viewer shows module `_<Addon>.dll_unloaded`, c0000005, at the
+instruction just after the trampoline call.
+
+The hook block is a whole committed page and the original layout uses only its
+first 18 bytes, so the rest now holds one small thunk per client slot plus a
+table of dispatch pointers (layout and bytes in `SceneHookThunk.h`).
+`owner_ptr` points at the owner's thunk, which calls the trampoline (so the
+return address is in the block, which nobody frees), then reads its slot's
+dispatch pointer and, only if it is still set, jumps into the module's client
+walk. `scenehook_unregister` clears that pointer before anything else, so a
+frame already inside `draw_scene` simply returns. If the thunk page cannot be
+set up, the module falls back to the old stub and pins itself
+(`GET_MODULE_HANDLE_EX_FLAG_PIN`), so it never unmaps. `scenehook_describe`
+ends with `thunk` or `pinned` to show which.
+
+The bus layout and ABI version are unchanged, so modules built from the older
+header still join the same bus and can hand the frame to a thunked client;
+only their own stubs keep the old risk. `native/tests/test_thunk.cpp` runs the
+thunk bytes on a 32-bit host, including an owner unregistering inside
+`draw_scene`.
 
 Handing the frame between modules is a single 4-byte aligned pointer store,
 which is atomic on x86. When the module that installed the patch unloads, its

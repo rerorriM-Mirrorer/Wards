@@ -118,7 +118,7 @@ local saved
 local saved_file={}
 package.loaded.config={load=function(d) local s={} for k,v in pairs(d) do s[k]=v end for k,v in pairs(saved_file) do s[k]=v end return s end,
     save=function(s) saved=s end}
-local fake_version='0.15.1'
+local fake_version='0.15.2'
 local fake={version=function() return fake_version end,start=function() return 'running' end,stop=function() return 'stopped' end,
     clear=function() calls[#calls+1]={'clear'} end,begin=function(i,id) calls[#calls+1]={'begin',i,id} end,
     ring=function(...) calls[#calls+1]={'ring',...} end,arc=function(...) calls[#calls+1]={'arc',...} end,commit=function() calls[#calls+1]={'commit'} end,
@@ -261,8 +261,15 @@ saved_file={}
 -- An old DLL (0.15.0) is refused with a clear message.
 fake_version='0.15.0' chat={}
 dofile('Wards.lua') events.load()
-local refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.1',1,true)~=nil end
+local refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.2',1,true)~=nil end
 check(refused,'old DLL refused with a message')
+
+-- Test4: the 0.15.1 DLL (no SceneHook owner thunks) is refused too.
+fake_version='0.15.1' chat={}
+dofile('Wards.lua') events.load()
+refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.2',1,true)~=nil end
+check(refused,'0.15.1 DLL (unload crash) refused with a message')
+fake_version='0.15.2'
 
 print(('Wards host simulation: %d passed, %d failed'):format(passes,fails))
 if fails>0 then os.exit(1) end

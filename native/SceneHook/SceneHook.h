@@ -16,6 +16,13 @@
 //
 // SceneHook.md, alongside this header, has the rationale, the walkthrough of
 // what happens when the installing module unloads, and the API example.
+//
+// 2026-11-23 (A): owner thunks (SceneHookThunk.h). owner_ptr now points at a
+// per-slot thunk inside the never-freed hook block instead of at module code,
+// so unloading the frame owner from inside draw_scene (Windower runs addon
+// Lua there) can no longer return into a freed DLL. Same bus layout and ABI
+// as before: modules built from the older header still join, hand the frame
+// to thunked clients safely, and keep their own (older) stub behaviour.
 
 #ifndef SCENEHOOK_H
 #define SCENEHOOK_H
@@ -25,8 +32,13 @@
 #include <cstdio>
 #include <cstring>
 
+#include "SceneHookThunk.h"
+
 #define SCENEHOOK_ABI_VERSION 2u
 #define SCENEHOOK_MAX_CLIENTS 64
+
+static_assert(scenehook_thunk::kSlots == SCENEHOOK_MAX_CLIENTS,
+    "one owner thunk per client slot");
 
 // FFXI is 32-bit, and the 9-byte patch below assumes a 4-byte pointer: an
 // absolute address written into a 6-byte instruction. A 64-bit build would
@@ -155,19 +167,11 @@ inline SceneBus* scenehook_attach() {
 
 namespace scenehook_detail {
 
-// Every module compiles its own copy. Only the copy belonging to the current
-// owner is reachable, via owner_ptr.
-inline void SCENEHOOK_ALIGN_STACK __fastcall owner_stub(void* renderer, void* unused) {
-    SceneBus* bus = cached_bus();
-    if (!bus) {
-        return;
-    }
+// How this module joined: 0 = not registered, 1 = owner thunk (safe to
+// unload at any time), 2 = legacy stub with the module pinned (fallback).
+inline int& stub_mode() { static int value = 0; return value; }
 
-    scenehook_stub_fn const original = bus->trampoline;
-    if (original) {
-        original(renderer, unused);
-    }
-
+inline void walk_clients(SceneBus* bus, void* renderer) {
     InterlockedIncrement(&bus->in_flight);
 
     for (int i = 0; i < SCENEHOOK_MAX_CLIENTS; ++i) {
@@ -182,6 +186,127 @@ inline void SCENEHOOK_ALIGN_STACK __fastcall owner_stub(void* renderer, void* un
     }
 
     InterlockedDecrement(&bus->in_flight);
+}
+
+// Reached from this slot's owner thunk after the original draw_scene has
+// returned into the thunk. Draws only; never calls the trampoline, so no
+// module code is on the stack while addon Lua can run.
+inline void SCENEHOOK_ALIGN_STACK __fastcall owner_dispatch(void* renderer, void*) {
+    SceneBus* bus = cached_bus();
+    if (bus) {
+        walk_clients(bus, renderer);
+    }
+}
+
+// Legacy stub, used only if the thunk page cannot be set up. It calls the
+// original draw_scene itself, so its module is pinned (see pin_self) to keep
+// the return address valid.
+inline void SCENEHOOK_ALIGN_STACK __fastcall owner_stub(void* renderer, void* unused) {
+    SceneBus* bus = cached_bus();
+    if (!bus) {
+        return;
+    }
+
+    scenehook_stub_fn const original = bus->trampoline;
+    if (original) {
+        original(renderer, unused);
+    }
+
+    walk_clients(bus, renderer);
+}
+
+// Keep this module mapped until the process exits. Only for the legacy-stub
+// fallback; a DLL update then needs a client restart (already the rule).
+inline void pin_self() {
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCSTR>(&cached_bus()), &self);
+}
+
+inline scenehook_thunk::ThunkHeader* thunk_header(unsigned char* page) {
+    return reinterpret_cast<scenehook_thunk::ThunkHeader*>(page + scenehook_thunk::kHeaderOffset);
+}
+
+inline bool thunks_ready(unsigned char* page) {
+    scenehook_thunk::ThunkHeader* header = thunk_header(page);
+    return InterlockedCompareExchange(reinterpret_cast<LONG volatile*>(&header->ready), 0, 0) == 1
+        && header->magic == scenehook_thunk::kMagic
+        && header->version == scenehook_thunk::kVersion;
+}
+
+inline void* volatile* dispatch_slot(unsigned char* page, int slot) {
+    return reinterpret_cast<void* volatile*>(
+        page + scenehook_thunk::kDispatchOffset + static_cast<std::size_t>(slot) * 4);
+}
+
+inline void* thunk_address(unsigned char* page, int slot) {
+    return page + scenehook_thunk::kThunkOffset
+        + static_cast<std::size_t>(slot) * scenehook_thunk::kThunkBytes;
+}
+
+// The hook block page, with the owner thunks built in it, or null if that is
+// not possible (unexpected block layout). With build = false it never builds,
+// only reports a page that is already ready (safe under the loader lock).
+inline unsigned char* thunk_page(SceneBus* bus, bool build) {
+    using namespace scenehook_thunk;
+    if (!bus || !bus->owner_ptr || !bus->trampoline) {
+        return nullptr;
+    }
+
+    auto* page = reinterpret_cast<unsigned char*>(bus->owner_ptr);
+    std::uintptr_t const base = reinterpret_cast<std::uintptr_t>(page);
+    if ((base & (kPageBytes - 1)) != 0
+        || reinterpret_cast<std::uintptr_t>(bus->trampoline) != base + 4) {
+        return nullptr;   // not the block layout this header installs
+    }
+
+    if (thunks_ready(page)) {
+        return page;
+    }
+    if (!build) {
+        return nullptr;
+    }
+
+    MEMORY_BASIC_INFORMATION region {};
+    if (!VirtualQuery(page, &region, sizeof(region))
+        || region.State != MEM_COMMIT
+        || region.Protect != PAGE_EXECUTE_READWRITE
+        || reinterpret_cast<std::uintptr_t>(region.BaseAddress) != base
+        || region.RegionSize < kPageBytes) {
+        return nullptr;
+    }
+
+    ThunkHeader* header = thunk_header(page);
+    LONG volatile* lock = reinterpret_cast<LONG volatile*>(&header->lock);
+    if (InterlockedCompareExchange(lock, 1, 0) == 0) {
+        if (!thunks_ready(page)) {
+            // The area past the original 32 bytes must still be untouched
+            // (zero-filled by VirtualAlloc); if anything else wrote there,
+            // leave it alone.
+            bool clean = header->magic == 0 && header->version == 0
+                && InterlockedCompareExchange(reinterpret_cast<LONG volatile*>(&header->ready), 0, 0) == 0;
+            for (std::size_t i = kDispatchOffset; clean && i < kEndOffset; ++i) {
+                clean = page[i] == 0;
+            }
+            if (clean) {
+                build_page(page, static_cast<std::uint32_t>(base),
+                    static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(bus->trampoline)));
+                FlushInstructionCache(GetCurrentProcess(), page + kThunkOffset,
+                    kSlots * kThunkBytes);
+                header->magic = kMagic;
+                header->version = kVersion;
+                MemoryBarrier();
+                InterlockedExchange(reinterpret_cast<LONG volatile*>(&header->ready), 1);
+            }
+        }
+        InterlockedExchange(lock, 0);
+    } else {
+        for (int spin = 0; spin < 2000 && !thunks_ready(page); ++spin) {
+            Sleep(1);
+        }
+    }
+
+    return thunks_ready(page) ? page : nullptr;
 }
 
 // Hand the frame to any live client other than `leaving`, or park it on the
@@ -488,7 +613,21 @@ inline int scenehook_register(SceneBus* bus, scenehook_draw_fn draw, void* user)
 
         SceneClient& client = bus->clients[i];
         client.draw = draw;
-        client.stub = &scenehook_detail::owner_stub;
+        // Prefer this slot's owner thunk in the never-freed hook block; fall
+        // back to this module's own stub, pinned so it can never unmap.
+        unsigned char* const page = scenehook_detail::thunk_page(bus, true);
+        if (page) {
+            InterlockedExchangePointer(
+                const_cast<void**>(scenehook_detail::dispatch_slot(page, i)),
+                reinterpret_cast<void*>(&scenehook_detail::owner_dispatch));
+            client.stub = reinterpret_cast<scenehook_stub_fn>(
+                scenehook_detail::thunk_address(page, i));
+            scenehook_detail::stub_mode() = 1;
+        } else {
+            scenehook_detail::pin_self();
+            client.stub = &scenehook_detail::owner_stub;
+            scenehook_detail::stub_mode() = 2;
+        }
         client.user = user;
         InterlockedExchange(&client.enabled, 1);
         MemoryBarrier();
@@ -517,6 +656,15 @@ inline void scenehook_unregister(SceneBus* bus, int slot, bool may_wait) {
 
     SceneClient& client = bus->clients[slot];
     InterlockedExchange(&client.enabled, 0);
+
+    // A frame already inside the original draw_scene (this very call may be
+    // running from addon Lua inside it) will return into this slot's thunk.
+    // Clear the dispatch pointer first so that frame just returns instead of
+    // jumping into a module that is about to unmap. Lock-free stores only.
+    if (unsigned char* const page = scenehook_detail::thunk_page(bus, false)) {
+        InterlockedExchangePointer(
+            const_cast<void**>(scenehook_detail::dispatch_slot(page, slot)), nullptr);
+    }
 
     // Hand the frame away before this module's stub can stop being valid code.
     if (InterlockedCompareExchange(&bus->owner_slot, 0, 0) == slot) {
@@ -569,9 +717,11 @@ inline void scenehook_describe(SceneBus const* bus, int slot, char* out, std::si
         return;
     }
     int const clients = scenehook_active_clients(bus);
-    std::snprintf(out, size, "%s, %d client%s",
+    int const mode = scenehook_detail::stub_mode();
+    std::snprintf(out, size, "%s, %d client%s, %s",
         bus->owner_slot == slot ? "driving the frame" : "riding along",
-        clients, clients == 1 ? "" : "s");
+        clients, clients == 1 ? "" : "s",
+        mode == 1 ? "thunk" : mode == 2 ? "pinned" : "unregistered");
 }
 
 #endif // SCENEHOOK_H
