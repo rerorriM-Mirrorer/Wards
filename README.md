@@ -6,7 +6,7 @@ Wards draws status visuals in the 3D scene around your own character. Since Test
 
 Copy the `Wards` folder into `Windower/addons/` (or download this repository and name its folder `Wards`), so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
 
-`libs/_Wards.dll` is TargetSC's renderer, built from the same source (a copy lives in `native/`). It's version 0.15.1, which adds arcs that turn to face the camera, so it's one step ahead of TargetSC's own 0.15.0. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test2 needs 0.15.1; with an older `_Wards.dll`, `//wards status` tells you to replace it.
+`libs/_Wards.dll` is TargetSC's renderer, built from the same source (a copy lives in `native/`). It's version 0.15.2: 0.15.1 added arcs that turn to face the camera, and 0.15.2 fixes a crash when Wards (or TargetSC) was unloaded or reloaded while the game was running. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test4 needs 0.15.2; with an older `_Wards.dll`, `//wards status` tells you to replace it.
 
 ## Commands
 
@@ -117,6 +117,8 @@ The HP ring sits `hp gap x span` above Protect.
 Wards hides itself while you're logged out, in cutscenes and events, and while zoning.
 
 ## Changelog
+
+- **0.3.1-test4** (2026-11-23): Crash fix, no visual change. Renderer 0.15.2: the shared scene hook no longer leaves renderer code on the stack while the game's frame runs, so `//lua unload`, `//lua reload` or `//wards restart` can't crash the client any more (it used to crash with `_Wards.dll_unloaded` or an unknown module). `//wards status` ends with `thunk` when the fix is active.
 
 - **0.3.0-test3** (2026-11-23): Debuff looks on yourself: Paralysis, Silence, Curse, Blind, Sleep, Stun (placeholder look) and Slow, stacked above the HP ring position in landing order with fades and gliding slots; Silence and Blind face your character's front. `//wards debuffs`, `debuff ...`, `preview debuff`. Protect, Shell and the HP ring are now off by default (a one-time settings upgrade turns them off in an existing settings file). Same renderer as Test2.
 

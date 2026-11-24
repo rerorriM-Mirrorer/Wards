@@ -2,6 +2,26 @@
 
 ## Current Development Status — 2026-11-23 (America/Chicago)
 
+- Repo/branch: `rerorriM-Mirrorer/Wards` `main`, on top of `069acfc`. Stack: `main@069acfc` -> this commit (one branch).
+- installed_base: Test3 (`abadbbb`; A ran it 10:23, Live). Package `Wards-0.3.1-Test4.zip` = files changed since `abadbbb`: Wards.lua, libs/_Wards.dll (0.15.2: **close every client before replacing it**), README.md.
+- Why: crash finding 2026-11-23 (project doc `ffxi-scenehook-unload-crash-finding-2026-11-23.md`). A's crash 18:33 on Myrr was `_TargetSC.dll_unloaded` at offset 0x23cf3 = the instruction right after SceneHook's `owner_stub` calls the original draw_scene (Verified by disassembly of the shipped TargetSC 0.16.0 DLL). An `unknown`-module crash at 06:13:30 is the same second Wards loaded (Verified from A's event export). Windower runs addon Lua inside draw_scene, so unloading the addon that drives the frame freed the DLL under its own return address (Inferred).
+- Changes: Test4, native 0.15.2. New `native/SceneHook/SceneHookThunk.h`: 64 per-slot thunks + dispatch table in the unused part of the never-freed hook-block page. `owner_ptr` now points at the owner's thunk; the thunk calls the trampoline, then jumps to the module's client walk only if its dispatch pointer is still set; `scenehook_unregister` clears it first. Fallback if the page cannot be used: old stub + module pinned. Same bus ABI 2 (Broguypal TargetRing/Vanish still interoperate; their own stubs keep the old risk). `scenehook_describe` (end of `//wards status`) ends with `thunk`, `pinned` or `unregistered`. Wards refuses DLLs other than 0.15.2. Version `0.3.1-test4`. No visual change; no new tunables.
+- Checks: `luac5.1 -p` all .lua PASS; `lua5.1 tests/test_wards.lua` 313/313 (new: 0.15.1 DLL refused); `lua5.1 tests/test_debuffs.lua` 37/37; native/ builds -Werror clean (i686-w64-mingw32-g++ 13-win32); test_property + test_stroke PASS; new `native/tests/test_thunk.cpp` (g++ -m32) 27/27 PASS: runs the thunk bytes for slots 0/1/17/63, checks esp and callee-saved registers, owner unregistering inside draw_scene (thunk returns without calling into the module), slot reused inside draw_scene (new module's walk runs); a mutated thunk without the null check segfaults, so the test can fail. Disassembly of the built DLL: `owner_dispatch` makes no trampoline call and ends in plain `ret`. Shipped DLL sha256 `e5c03f0f3b79f59dba0a928a98ccdd369acb963546465a23dbd3a8a99cc2162e`, 219,150 bytes. Host only.
+- TargetSC needs the same header (DLL 0.16.1) or it can still crash when TargetSC itself is unloaded while it drives the frame: patch for Skillchains `development/targetsc-lit-disc` delivered separately (not pushed there: attach with push denied).
+- Pending (A): everything in game. Test3's front-arc direction and Slow's turning direction still unreported.
+- Next: A's Test3 next steps (fixed debuff order, anatomical anchors per race).
+
+## Test4 checklist
+
+- [ ] Close every client, unzip Test4 into addons (replaces `libs/_Wards.dll`), start the game. `//wards status`: does the last line say `TargetSC 0.15.2 running` and end with `thunk`?
+- [ ] Debuff previews look exactly as in Test3 (`//wards preview debuff all`)?
+- [ ] Unload stress (only after TargetSC is also on 0.16.1, or with TargetSC not loaded): `//lua unload wards`, `//lua load wards`, `//lua reload wards` a few times each. Any crash? If yes, send the Event Viewer entry (module name + fault offset).
+- [ ] With both Wards and TargetSC loaded: reload each a few times in different orders. Both keep drawing afterwards?
+
+---
+
+## Current Development Status — 2026-11-23 (America/Chicago)
+
 - Repo/branch: `rerorriM-Mirrorer/Wards` `main` (new repository). Docs/structure only; no addon code change since Test3.
 - installed_base: Test3 (Skillchains-branch SHA `d11d6b5`, here `abadbbb` after the history move; A ran it 10:23, Live: "such cool effects", especially Paralysis's buzz and Stun's tilting orbit).
 - Changes: Wards history moved here from `rerorriM-Mirrorer/Skillchains` `development/wards-protect-shell` with `git subtree split --prefix=Wards` (that branch was never pushed). Added canon `AGENTS.md` (shared 2026-11-21.3 + REPO block) and `WORKFLOW.md` (2026-11-20.1) from ffxi-NPCmirror main `45ae2eb`; `native/` = renderer source 0.15.1 (TargetSC + SceneHook); tests run from the repo root; CI `.github/workflows/wards-testing.yml`.
