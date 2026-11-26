@@ -1,10 +1,10 @@
 # Wards
 
-Wards draws status visuals in the 3D scene around your own character. Since Test3 that means **debuffs**: each debuff has its own look (color, glow and motion), and they stack upward above the HP ring's position in the order they landed. The Protect/Shell rings and the enemybar2-style HP ring are still there, but they're **off by default** (`//wards protect on`, `//wards shell on`, `//wards hp on`). A blue Protect ring sits where TargetSC's sky ring rests, and a green Shell ring sits just below it. Each ring fades in when the buff lands and fades out when it wears off. This is the first test of a larger idea: status visuals drawn on characters with TargetSC's ring renderer.
+Wards draws status visuals in the 3D scene around your own character. Since Test3 that means **debuffs**: each debuff has its own look (color, glow and motion), and they stack upward above the HP ring's position in the order they landed. The Protect/Shell rings and the enemybar2-style HP ring are still there, but they're **off by default** (`//wards protect on`, `//wards shell on`, `//wards hp on`). A blue Protect ring sits where TargetSC's sky ring rests, and a green Shell ring sits just below it. Each ring fades in when the buff lands and fades out when it wears off. The `development/protect-vfx-poc` branch adds a separate, faint idle shimmer while Protect is active; it is an experiment, not a replacement for the existing ring.
 
 ## Install
 
-Copy the `Wards` folder into `Windower/addons/` (or download this repository and name its folder `Wards`), so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
+Copy the `Wards` folder into `Windower/addons/` (or download this repository and name its folder `Wards`), so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua`, `addons/Wards/wards_vfx.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
 
 `libs/_Wards.dll` is TargetSC's renderer, built from the same source (a copy lives in `native/`). It's version 0.15.2: 0.15.1 added arcs that turn to face the camera, and 0.15.2 fixes a crash when Wards (or TargetSC) was unloaded or reloaded while the game was running. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test4 needs 0.15.2; with an older `_Wards.dll`, `//wards status` tells you to replace it.
 
@@ -16,8 +16,12 @@ Copy the `Wards` folder into `Windower/addons/` (or download this repository and
 | `//wards status` | Version, renderer, whether Protect/Shell are seen, every setting. |
 | `//wards on` / `off` | Turns all drawing on or off. |
 | `//wards protect [on\|off]` | Shows or hides the Protect ring (bare = toggle). |
+| `//wards shimmer [on\|off]` | Toggles the Protect idle shimmer independently of the Protect ring (default on). |
+| `//wards shimmer opacity <0.01-0.40>` | Maximum shimmer core alpha (default 0.16). |
+| `//wards shimmer period <2-12>` | Seconds between passes (default 4.8). |
+| `//wards shimmer duration <0.25-1.5>` | Seconds per pass (default 0.75). |
 | `//wards shell [on\|off]` | Shows or hides the Shell ring (bare = toggle). |
-| `//wards test protect\|shell\|both\|off` | Shows rings without the buff, for tuning. `protect` / `shell` toggle. |
+| `//wards test protect\|shell\|hp\|shimmer\|both\|off` | Shows looks without the buff, for tuning. `protect`, `shell`, `hp` and `shimmer` toggle. |
 | `//wards color protect\|shell <choice>` | Ring color, see below. |
 | `//wards height <0.25-3>` | Height span, same meaning as TargetSC `height` (default 0.66). |
 | `//wards scale <0.25-3>` | Ring size, same meaning as TargetSC `scale` (default 2). |
@@ -41,6 +45,12 @@ Copy the `Wards` folder into `Windower/addons/` (or download this repository and
 | `//wards preview debuff <name\|all>` | Shows a look without having the debuff (toggle). `//wards preview off` ends every preview. |
 | `//wards defaults` | Restores every setting. |
 | `//wards restart` / `unload` | Reloads or unloads Wards. |
+
+## Protect idle shimmer (POC)
+
+This experiment is on `development/protect-vfx-poc`; it is not part of `main` and has not yet been visually tested in FFXI. While Protect is present, a narrow blue band occasionally travels up or down the character. Most passes use one band; every fourth pass may use a second band moving the other way. Each band is a very faint core with a softer halo. It uses the existing ring geometry and depth testing, not a permanent aura or a particle system. The Protect ring remains independently controlled by `//wards protect`.
+
+`//wards shimmer on|off` controls the shimmer without changing the Protect ring. `//wards test shimmer` previews it without the buff. Defaults: opacity 0.16, period 4.8 seconds, duration 0.75 seconds. `//wards status` reports the toggle and tuning values. This first POC only implements the idle shimmer; expiration glints, the directional impact surface, honeycomb ripple and combat intensity are still pending.
 
 Settings are saved in `Wards/data/settings.xml`.
 
@@ -117,6 +127,8 @@ The HP ring sits `hp gap x span` above Protect.
 Wards hides itself while you're logged out, in cutscenes and events, and while zoning.
 
 ## Changelog
+
+- **0.3.2-test5** (2026-11-26, POC branch): Adds a faint Protect idle shimmer and `//wards test shimmer`, with independent toggle and opacity/period/duration controls. Reuses the existing native ring renderer; no DLL or combat-event changes. Host-verified only; in-game appearance pending.
 
 - **0.3.1-test4** (2026-11-23): Crash fix, no visual change. Renderer 0.15.2: the shared scene hook no longer leaves renderer code on the stack while the game's frame runs, so `//lua unload`, `//lua reload` or `//wards restart` can't crash the client any more (it used to crash with `_Wards.dll_unloaded` or an unknown module). `//wards status` ends with `thunk` when the fix is active.
 

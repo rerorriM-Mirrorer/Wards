@@ -176,7 +176,7 @@ local help_lines={
     {'shimmer period <2-12>','Seconds between passes (default 4.8).'},
     {'shimmer duration <0.25-1.5>','Seconds per pass (default 0.75).'},
     {'shell [on|off]','Show or hide the Shell ring (bare = toggle).'},
-    {'test <protect|shell|both|off>','Show rings without the buff, for tuning.'},
+    {'test <protect|shell|hp|shimmer|both|off>','Show looks without the buff, for tuning.'},
     {'color <protect|shell> <element|icon|iconlight|R,G,B>','Ring color (element = TargetSC Water / Wind).'},
     {'height <0.25-3>','Height span, like TargetSC height (default 0.66).'},
     {'scale <0.25-3>','Ring size, like TargetSC scale (default 2).'},

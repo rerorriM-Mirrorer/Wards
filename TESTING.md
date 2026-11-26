@@ -1,3 +1,29 @@
+## Current Development Status — 2026-11-26 (America/Chicago)
+
+- Repo/branch: `rerorriM-Mirrorer/Wards` `development/protect-vfx-poc`, code head before this documentation update: `65764de57592bd5e2c910c37afb1106513250f48`. Stack: installed Test3 `abadbbb276132a7ae8210dd78b9ce52f3af51fed` -> Test4 source-tree snapshot `14858e288e69dfaf9811c185bc857c6f01171a68` -> Protect shimmer POC.
+- installed_base: Test3 (`abadbbb`; Live, as recorded below). Test4 source and renderer 0.15.2 are carried forward from the current Wards tree, but remain Pending in-game. `main` is unchanged.
+- Changes: Wards `0.3.2-test5`. New `wards_vfx.lua` contains an independent idle-shimmer state machine; `Wards.lua` connects it to Protect status ID 40, local-player rendering, toggle, tuning and preview; `tests/test_wards.lua` covers motion, first delay, single/double-band cap, reset and commands. The shimmer uses the current `native.ring` API. No native source, DLL, packet handler or damage calculation changed.
+- Defaults: shimmer on while Protect is active; core opacity 0.16, period 4.8 s, pass duration 0.75 s. Commands: `//wards shimmer [on|off]`, `//wards shimmer opacity <0.01-0.40>`, `//wards shimmer period <2-12>`, `//wards shimmer duration <0.25-1.5>`, `//wards test shimmer`.
+- Checks: GitHub Actions run [45853767535](https://github.com/rerorriM-Mirrorer/Wards/actions/runs/45853767535) PASS on `65764de`. Workflow ran `luac5.1 -p` over root/test Lua files; `lua5.1 tests/test_wards.lua` (339 passed, 0 failed); `lua5.1 tests/test_debuffs.lua` PASS; native 0.15.2 source build PASS; `test_property`, `test_stroke`, and `test_thunk` PASS. Static/host verification only.
+- Live: installed base is Test3 only. No Protect shimmer visual/timing/placement has been tested in FFXI.
+- Pending (A): install the POC branch package on a test client; inspect `//wards status`; run `//wards test shimmer`; observe it in third-person from near/far camera distance and with different character/body sizes; confirm it remains subtle, follows the body, and disappears on toggle, logout, cutscene and zone change. Then enable Protect and confirm normal ring behavior is unchanged. Report any visual or coexistence issue with TargetSC.
+- Pending development: expiration glints; impact detection from incoming action packets; a native heading-oriented shield surface; a transient honeycomb ripple; a manually supplied 1-9999 intensity preview; then a damage-severity proxy. Actual damage prevented is not exposed by the verified action packet fields; received physical damage is only a proxy, not prevented damage.
+- Next: verify this docs/help update, then continue with the next isolated visual step after the shimmer has an in-game observation.
+
+## Test5 shimmer checklist
+
+- [ ] Install the POC branch package on a test Wards install; keep the installed Test3 baseline available for rollback.
+- [ ] `//wards status`: version 0.3.2-test5, renderer 0.15.2 running, shimmer enabled, opacity 0.16, period 4.8, duration 0.75.
+- [ ] `//wards test shimmer`: one narrow blue band appears, travels smoothly, then disappears; most passes are single-band.
+- [ ] Observe enough passes to confirm the occasional double pass never exceeds two bands and still feels quiet.
+- [ ] `//wards shimmer off`: shimmer stops immediately while existing Protect ring toggles remain independent; `//wards shimmer on` restores it.
+- [ ] With Protect active, confirm normal idle shimmer appears and stops after Protect wears off.
+- [ ] Test cutscene, logout and zone-change cleanup; check that no frozen band remains.
+- [ ] Test with TargetSC loaded and reloaded in both addon orders; check for rendering or unload regressions.
+- [ ] Send `//wards status` and a short description or capture of placement, opacity and motion. Do not treat host simulation as visual confirmation.
+
+---
+
 # Wards TESTING
 
 ## Current Development Status — 2026-11-23 (America/Chicago)
