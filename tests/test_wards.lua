@@ -126,11 +126,12 @@ check(shimmer_moving[2].offset>shimmer_first[2].offset,'shimmer moves smoothly u
 vfx.shimmer(shimmer_state,true,6.0,1,2,shimmer_opts,shimmer_color) -- second pass starts here
 local shimmer_second=vfx.shimmer(shimmer_state,true,6.2,1,2,shimmer_opts,shimmer_color)
 check(band_count(shimmer_second)==1,'normal shimmer pass remains one band')
-vfx.shimmer(shimmer_state,true,10.8,1,2,shimmer_opts,shimmer_color)
-vfx.shimmer(shimmer_state,true,15.6,1,2,shimmer_opts,shimmer_color) -- fourth pass begins
-local shimmer_double=vfx.shimmer(shimmer_state,true,16.0,1,2,shimmer_opts,shimmer_color)
-check(band_count(shimmer_double)==2 and #shimmer_double==4,'occasional double pass stays at two bands')
-check(#vfx.shimmer(shimmer_state,false,16.1,1,2,shimmer_opts,shimmer_color)==0 and not shimmer_state.active,'shimmer resets when disabled')
+vfx.shimmer(shimmer_state,true,10.9,1,2,shimmer_opts,shimmer_color) -- third pass begins
+vfx.shimmer(shimmer_state,true,15.8,1,2,shimmer_opts,shimmer_color) -- fourth pass begins
+local shimmer_double=vfx.shimmer(shimmer_state,true,16.1,1,2,shimmer_opts,shimmer_color)
+check(band_count(shimmer_double)==2 and #shimmer_double==4,
+    'occasional double pass stays at two bands: '..band_count(shimmer_double)..' bands, '..#shimmer_double..' rings')
+check(#vfx.shimmer(shimmer_state,false,16.2,1,2,shimmer_opts,shimmer_color)==0 and not shimmer_state.active,'shimmer resets when disabled')
 
 -- Addon smoke test with stubbed Windower -----------------------------------
 local chat,calls,events,sent={},{},{},{}
