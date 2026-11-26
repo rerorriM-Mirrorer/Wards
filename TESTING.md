@@ -1,29 +1,57 @@
 ## Current Development Status — 2026-11-26 (America/Chicago)
 
-- Repo/branch: \`rerorriM-Mirrorer/Wards\` \`development/protect-vfx-poc\`, source head before this docs update: \`acdfb2626e2e6166aaf49075a9482faa9bf40aec\`; CI-published DLL commit: \`4c7f36468c8cb2eb1fa113d0e316c32085aed98b\`. Branch base: installed Test3 \`abadbbb276132a7ae8210dd78b9ce52f3af51fed\` -> carried-forward Test4 source tree \`14858e288e69dfaf9811c185bc857c6f01171a68\`. \`main\` is unchanged.
-- Version: Wards \`0.3.3-test6\`; native renderer \`0.16.0\`. The native API is guarded by an exact version check; Wards refuses older DLLs.
-- Changes: \`wards_vfx.lua\` contains idle shimmer, Protect-loss glints, normalized impact intensity, and shield/ripple animation state. \`Wards.lua\` wires those to Protect status ID 40, incoming packet 0x028 categories 1/2, manual preview commands, and independent toggles. Native renderer adds one heading-oriented shield and up to eight camera-facing hex glints; honeycomb is bounded to 96 cells and shares the existing D3D8 alpha-blended triangle batch. No shaders or external particle system.
-- Impact packet scope: incoming melee category 1 and ranged-finish category 2 only, local recipient ID only, positive Param when Message=1, with multi-action damage summed. Weapon skills, NPC TP, magic, and job abilities remain excluded pending a reliable physical/magical classifier. Full packet reasoning is in \`docs/PACKETS.md\`.
-- Intensity: VFX state accepts integer 1-9999 independently of its source. Current packet proxy = \`clamp(round(total_landed_damage * 10),1,9999)\`; response curve = \`(intensity/9999)^1.6\`. This is landed-hit severity, **not damage prevented**. The incoming action packet does not expose the counterfactual without Protect or a prevented-damage field.
+- Repository: `rerorriM-Mirrorer/Wards`; branch: `development/protect-vfx-poc`. This documentation/package change is based on code head `1955e14e280ca96363bc10e579bd0c17a1908ff7`. The branch was created from installed Test3 `abadbbb276132a7ae8210dd78b9ce52f3af51fed`, carrying forward Test4 source tree `14858e288e69dfaf9811c185bc857c6f01171a68`. `main` is unchanged.
+- Versions: Wards `0.3.3-test6`; native renderer `0.16.0`. Runtime checks require exactly 0.16.0 and reject earlier DLLs.
+- Implemented: one/two faint vertical idle shimmer bands, four tiny Protect-expiration hex glints, a heading-oriented translucent shield with brighter edges, and a short radial honeycomb ripple. Each effect has an independent toggle or preview. Native geometry is bounded (one shield, up to 96 honeycomb cells, up to eight glints) and uses the existing D3D8/SceneHook renderer.
+- Combat integration: incoming action packet `0x028`, categories 1 (melee) and 2 (ranged finish), local recipient ID only, `Message == 1`, positive `Param`; multi-action damage is summed. Modified packet data is preferred and packets blocked by another addon are ignored. Weapon skills, TP moves, spells, items and job abilities are excluded until their physical/magical damage type can be classified reliably.
+- Intensity: animation accepts a separate integer from 1 to 9999. Incoming landed damage maps to `clamp(round(total_damage * 10), 1, 9999)`, with visual response `(intensity / 9999)^1.6`. This is an impact-severity proxy, **not damage prevented**. The packet does not reveal the counterfactual damage without Protect or an actual prevented-damage field.
+- Defaults: shimmer enabled, core alpha 0.16, period 4.8 s, duration 0.75 s; four expiry glints over 0.50 s; impact shield 0.48 s, ripple 0.32 s. Optional sparks and shield flex were intentionally deferred.
+- Commands: `//wards shimmer [on|off]`; shimmer `opacity`, `period`, `duration` tuning; `//wards glints [on|off]`; `//wards impact [on|off]`; `//wards test shimmer`; `//wards test expire`; `//wards test impact <1-9999>`; `//wards test off`.
+- Host verification: GitHub Actions run [45858351068](https://github.com/rerorriM-Mirrorer/Wards/actions/runs/45858351068) passed on the code head above. Wards host simulation: **372 passed, 0 failed**; debuff host simulation passed; native 0.16.0 i686 MinGW build passed; property, stroke, unload-thunk and shield geometry checks passed. This is static/host verification only.
+- Native package: the exact stripped 32-bit DLL produced by CI is committed at `libs/_Wards.dll`. A package-artifact job is being added to publish all runtime files together after the test job succeeds.
+- Live status: installed Test3 remains the only in-game-confirmed baseline. Test4 and this Protect VFX POC are **Pending in-game**. No VFX appearance, heading, packet timing, or TargetSC coexistence has been visually tested in FFXI.
+- Required in-game test: close all game clients before replacing the DLL; install the POC addon; run `//wards status`, `//wards test shimmer`, `//wards test expire`, and `//wards test impact 1`, `5000`, `9999`; then check real Protect, melee/ranged hits, multi-hit, excluded action types, TargetSC load orders, zone/logout/cutscene cleanup and unload/reload safety. Record actual visuals before changing the restrained defaults.
+
+## Test6 VFX checklist
+
+- [ ] With every game client closed, install the package and load Wards. `//wards status` should report Wards 0.3.3-test6 and renderer 0.16.0.
+- [ ] `//wards test shimmer`: narrow blue band sweeps smoothly; normally one band, never more than two.
+- [ ] `//wards test expire`: four tiny hex glints disperse gently and fade.
+- [ ] `//wards test impact 1`, `5000`, `9999`: shield faces character heading, center stays translucent, edges brighten, flash fades rapidly, and the honeycomb ripple travels across the surface.
+- [ ] Enable Protect and test melee hits; then ranged hits if practical. Verify local-recipient matching and multi-hit aggregation.
+- [ ] Confirm WS/TP moves, magic, items, unrelated targets and packets blocked by another addon do not trigger the current POC.
+- [ ] Verify expiry glints occur only when Protect disappears, not on zone/logout/cutscene resets.
+- [ ] Run alongside TargetSC; load/reload/unload both in both addon orders. Confirm no crash, frozen geometry or lost TargetSC drawings.
+- [ ] Capture `//wards status` and visual notes. Host tests do not satisfy this checklist.
+
+---
+
+## Prior Development Status — initial VFX implementation (2026-11-26)
+
+- Repo/branch: `rerorriM-Mirrorer/Wards` `development/protect-vfx-poc`, source head before this docs update: `acdfb2626e2e6166aaf49075a9482faa9bf40aec`; CI-published DLL commit: `4c7f36468c8cb2eb1fa113d0e316c32085aed98b`. Branch base: installed Test3 `abadbbb276132a7ae8210dd78b9ce52f3af51fed` -> carried-forward Test4 source tree `14858e288e69dfaf9811c185bc857c6f01171a68`. `main` is unchanged.
+- Version: Wards `0.3.3-test6`; native renderer `0.16.0`. The native API is guarded by an exact version check; Wards refuses older DLLs.
+- Changes: `wards_vfx.lua` contains idle shimmer, Protect-loss glints, normalized impact intensity, and shield/ripple animation state. `Wards.lua` wires those to Protect status ID 40, incoming packet 0x028 categories 1/2, manual preview commands, and independent toggles. Native renderer adds one heading-oriented shield and up to eight camera-facing hex glints; honeycomb is bounded to 96 cells and shares the existing D3D8 alpha-blended triangle batch. No shaders or external particle system.
+- Impact packet scope: incoming melee category 1 and ranged-finish category 2 only, local recipient ID only, positive Param when Message=1, with multi-action damage summed. Weapon skills, NPC TP, magic, and job abilities remain excluded pending a reliable physical/magical classifier. Full packet reasoning is in `docs/PACKETS.md`.
+- Intensity: VFX state accepts integer 1-9999 independently of its source. Current packet proxy = `clamp(round(total_landed_damage * 10),1,9999)`; response curve = `(intensity/9999)^1.6`. This is landed-hit severity, **not damage prevented**. The incoming action packet does not expose the counterfactual without Protect or a prevented-damage field.
 - Defaults: shimmer, expiry glints and impact on; shimmer core alpha 0.16, period 4.8 s, duration 0.75 s; glints 4 over 0.50 s; shield 0.48 s and ripple 0.32 s.
-- Commands: \`//wards shimmer [on|off]\`; shimmer opacity/period/duration tuning; \`//wards glints [on|off]\`; \`//wards impact [on|off]\`; \`//wards test shimmer\`; \`//wards test expire\`; \`//wards test impact <1-9999>\`; \`//wards test off\`.
-- Checks: GitHub Actions [45857011809](https://github.com/rerorriM-Mirrorer/Wards/actions/runs/45857011809) PASS on \`acdfb26\`: Lua 5.1 syntax parse, Wards host simulation **371 passed / 0 failed**, debuff host simulation PASS, native 0.16.0 i686 MinGW build PASS, property/stroke/thunk/shield-geometry tests PASS. The publish job PASS; the exact checked DLL was stripped and committed to \`libs/_Wards.dll\` at \`4c7f364\`. Static/host verification only.
+- Commands: `//wards shimmer [on|off]`; shimmer opacity/period/duration tuning; `//wards glints [on|off]`; `//wards impact [on|off]`; `//wards test shimmer`; `//wards test expire`; `//wards test impact <1-9999>`; `//wards test off`.
+- Checks: GitHub Actions [45857011809](https://github.com/rerorriM-Mirrorer/Wards/actions/runs/45857011809) PASS on `acdfb26`: Lua 5.1 syntax parse, Wards host simulation **371 passed / 0 failed**, debuff host simulation PASS, native 0.16.0 i686 MinGW build PASS, property/stroke/thunk/shield-geometry tests PASS. The publish job PASS; the exact checked DLL was stripped and committed to `libs/_Wards.dll` at `4c7f364`. Static/host verification only.
 - Live status: installed Test3 is the only in-game-confirmed baseline. Test4 and all Protect VFX POC work remain Pending in-game. No visual, timing, heading, or packet event has been tested in FFXI.
-- Pending (A): install the POC package with every client closed before replacing the DLL; test \`//wards status\`, each preview, and real Protect. Inspect shimmer placement/body occlusion/opacity; expiry glints; circle forward-facing orientation and edge opacity; ripple clarity; manual 1/5000/9999 response; melee and ranged packet classification; multi-hit aggregation; no effects on spells/WS/other targets; TargetSC coexistence in both addon load orders; cutscene/zone/logout/unload cleanup. Report actual visual observations before tuning.
+- Pending (A): install the POC package with every client closed before replacing the DLL; test `//wards status`, each preview, and real Protect. Inspect shimmer placement/body occlusion/opacity; expiry glints; circle forward-facing orientation and edge opacity; ripple clarity; manual 1/5000/9999 response; melee and ranged packet classification; multi-hit aggregation; no effects on spells/WS/other targets; TargetSC coexistence in both addon load orders; cutscene/zone/logout/unload cleanup. Report actual visual observations before tuning.
 - Pending development: visual tuning after A's first in-game capture; broader WS/TP physical classifier only if damage type can be established; optional sparks/flex only after core stability. No prevented-damage formula is implemented.
 - Next: verify this docs update, then deliver the POC package and in-game checklist.
 
 ## Test6 VFX checklist
 
-- [ ] Close all game clients, install the complete package, and load Wards; \`//wards status\` must show version 0.3.3-test6 and native 0.16.0 running.
-- [ ] \`//wards test shimmer\`: subtle narrow band sweeps smoothly; normally one band, never more than two.
-- [ ] \`//wards test expire\`: four tiny hex glints disperse gently and fade; no lasting geometry.
-- [ ] \`//wards test impact 1\`, \`5000\`, \`9999\`: circle faces the character's heading, center stays translucent, edges are brighter, flash is quick and fades rapidly; honeycomb traces over the face then disappears.
+- [ ] Close all game clients, install the complete package, and load Wards; `//wards status` must show version 0.3.3-test6 and native 0.16.0 running.
+- [ ] `//wards test shimmer`: subtle narrow band sweeps smoothly; normally one band, never more than two.
+- [ ] `//wards test expire`: four tiny hex glints disperse gently and fade; no lasting geometry.
+- [ ] `//wards test impact 1`, `5000`, `9999`: circle faces the character's heading, center stays translucent, edges are brighter, flash is quick and fades rapidly; honeycomb traces over the face then disappears.
 - [ ] Enable Protect and test incoming melee hits; if safe, verify ranged hits too. Compare one hit and multi-hit; effect must be on the recipient only.
 - [ ] Confirm weapon skills, TP moves, magic, items, and unrelated targets do not trigger the current POC.
 - [ ] Verify glints only on Protect removal, not on zoning/logout or cutscene reset.
 - [ ] Run Wards alongside TargetSC; reload/unload both in both addon orders; no frozen effects, crashes, or lost TargetSC drawings.
-- [ ] Capture \`//wards status\` and visuals for subsequent opacity, scale, heading, and timing adjustments. Do not mark these complete from host simulation.
+- [ ] Capture `//wards status` and visuals for subsequent opacity, scale, heading, and timing adjustments. Do not mark these complete from host simulation.
 
 ---
 

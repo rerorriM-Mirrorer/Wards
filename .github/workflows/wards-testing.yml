@@ -61,3 +61,50 @@ jobs:
           git add libs/_Wards.dll
           git commit -m "Build Wards native renderer 0.16.0"
           git push
+
+  package-poc-addon:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/development/protect-vfx-poc'
+    needs: wards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble installable Protect VFX POC
+        run: |
+          set -euo pipefail
+          package=/tmp/wards-protect-vfx-poc
+          mkdir -p "$package/Wards/libs"
+          cp Wards.lua wards_model.lua wards_debuffs.lua wards_vfx.lua "$package/Wards/"
+          cp libs/_Wards.dll "$package/Wards/libs/"
+          cp README.md "$package/README.md"
+          cat > "$package/POC_TESTING.md" <<'EOF'
+          # Wards Protect VFX POC test notes
+
+          This is an experimental branch build, not a release. The visuals have passed host/static checks but have not yet been observed in FFXI.
+
+          ## Install
+          1. Close every running FFXI client before replacing the native DLL.
+          2. Copy the included `Wards` folder into Windower's `addons` directory.
+          3. Start FFXI and load Wards with `//lua load Wards`.
+          4. Run `//wards status`. It must report Wards 0.3.3-test6 and renderer 0.16.0.
+
+          ## Visual previews
+          - `//wards test shimmer`: toggles the subtle idle shimmer.
+          - `//wards test expire`: emits four tiny expiration glints.
+          - `//wards test impact 1`, `5000`, or `9999`: previews a chosen shield intensity.
+          - `//wards test off`: clears preview states.
+          - `//wards shimmer off`, `//wards glints off`, and `//wards impact off` independently disable the corresponding live effect.
+
+          ## Live checks
+          Confirm Protect starts/stops the shimmer, that loss of Protect emits glints, and that incoming melee/ranged physical hits on the local recipient produce the shield and honeycomb ripple. Check that WS/TP moves, magic, unrelated targets and packets blocked by another addon do not trigger it. Test alongside TargetSC in both addon load orders and verify logout, zone, cutscene, unload and reload behavior.
+
+          The packet-derived value represents landed-damage severity only. It is not a measurement or estimate of damage prevented by Protect. Do not mark the POC visually verified until it has been tested in-game.
+          EOF
+          file "$package/Wards/libs/_Wards.dll"
+          i686-w64-mingw32-objdump -p "$package/Wards/libs/_Wards.dll" | grep -q 'luaopen__TargetSC'
+          grep -aq 'TargetSC 0.16.0' "$package/Wards/libs/_Wards.dll"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wards-protect-vfx-poc
+          path: /tmp/wards-protect-vfx-poc/*
+          if-no-files-found: error
+          retention-days: 30
