@@ -125,9 +125,10 @@ check(shimmer_moving[2].offset>shimmer_first[2].offset,'shimmer moves smoothly u
 local shimmer_second=vfx.shimmer(shimmer_state,true,6.0,1,2,shimmer_opts,shimmer_color)
 check(band_count(shimmer_second)==1,'normal shimmer pass remains one band')
 vfx.shimmer(shimmer_state,true,10.8,1,2,shimmer_opts,shimmer_color)
-local shimmer_double=vfx.shimmer(shimmer_state,true,15.6,1,2,shimmer_opts,shimmer_color)
+vfx.shimmer(shimmer_state,true,15.6,1,2,shimmer_opts,shimmer_color) -- fourth pass begins
+local shimmer_double=vfx.shimmer(shimmer_state,true,16.0,1,2,shimmer_opts,shimmer_color)
 check(band_count(shimmer_double)==2 and #shimmer_double==4,'occasional double pass stays at two bands')
-check(#vfx.shimmer(shimmer_state,false,15.7,1,2,shimmer_opts,shimmer_color)==0 and not shimmer_state.active,'shimmer resets when disabled')
+check(#vfx.shimmer(shimmer_state,false,16.1,1,2,shimmer_opts,shimmer_color)==0 and not shimmer_state.active,'shimmer resets when disabled')
 
 -- Addon smoke test with stubbed Windower -----------------------------------
 local chat,calls,events,sent={},{},{},{}
@@ -280,8 +281,13 @@ events['addon command']('test','shimmer')
 for _=1,38 do frame() end
 check(count('ring')==2,'test shimmer draws one faint band without the buff')
 events['addon command']('shimmer','off') frame()
-check(count('ring')==0,'shimmer toggle hides the preview immediately')
+check(count('ring')==0 and saved.protect_shimmer==false,'shimmer toggle hides the preview immediately')
 events['addon command']('test','off')
+events['addon command']('shimmer','opacity','0.25') check(saved.protect_shimmer_opacity==.25,'shimmer opacity is saved')
+events['addon command']('shimmer','period','3') check(saved.protect_shimmer_period==3,'shimmer period is saved')
+events['addon command']('shimmer','duration','0.5') check(saved.protect_shimmer_duration==.5,'shimmer duration is saved')
+events['addon command']('shimmer','period','20') check(saved.protect_shimmer_period==3,'shimmer range is enforced')
+events['addon command']('defaults') check(saved.protect_shimmer==true and saved.protect_shimmer_opacity==.16,'defaults restore Protect shimmer')
 
 -- Settings upgrade: a Test2 file (rings on, no version) gets them off once;
 -- a version-3 file keeps what A chose.
