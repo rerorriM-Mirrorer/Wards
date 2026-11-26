@@ -6,7 +6,7 @@ Wards draws status visuals in the 3D scene around your own character. Since Test
 
 Copy the `Wards` folder into `Windower/addons/` (or download this repository and name its folder `Wards`), so you have `addons/Wards/Wards.lua`, `addons/Wards/wards_model.lua`, `addons/Wards/wards_debuffs.lua`, `addons/Wards/wards_vfx.lua` and `addons/Wards/libs/_Wards.dll`. Then type `//lua load Wards` in game.
 
-`libs/_Wards.dll` is TargetSC's renderer, built from the same source (a copy lives in `native/`). It's version 0.15.2: 0.15.1 added arcs that turn to face the camera, and 0.15.2 fixes a crash when Wards (or TargetSC) was unloaded or reloaded while the game was running. The renderer draws one character per frame, so Wards needs its own copy. If both addons shared one copy, each would erase the other's rings. Like TargetSC's DLL, it can only be replaced while every game client is closed. Wards Test4 needs 0.15.2; with an older `_Wards.dll`, `//wards status` tells you to replace it.
+`libs/_Wards.dll` is Wards' private copy of TargetSC's D3D8 renderer, built from the source in `native/`. Renderer 0.16.0 retains the 0.15.2 SceneHook unload-safety thunks and adds the heading-oriented shield and camera-facing hex geometry. The renderer draws one character per frame, so Wards needs its own copy; both addons can run together through SceneHook. Like TargetSC's DLL, it can only be replaced while every game client is closed. This POC requires 0.16.0; with an older `_Wards.dll`, `//wards status` tells you to replace it.
 
 ## Commands
 
@@ -20,8 +20,10 @@ Copy the `Wards` folder into `Windower/addons/` (or download this repository and
 | `//wards shimmer opacity <0.01-0.40>` | Maximum shimmer core alpha (default 0.16). |
 | `//wards shimmer period <2-12>` | Seconds between passes (default 4.8). |
 | `//wards shimmer duration <0.25-1.5>` | Seconds per pass (default 0.75). |
+| `//wards impact [on\|off]` | Enables the brief Protect shield on incoming melee/ranged hits (default on). |
+| `//wards glints [on\|off]` | Enables tiny hex glints when Protect wears off (default on). |
 | `//wards shell [on\|off]` | Shows or hides the Shell ring (bare = toggle). |
-| `//wards test protect\|shell\|hp\|shimmer\|both\|off` | Shows looks without the buff, for tuning. `protect`, `shell`, `hp` and `shimmer` toggle. |
+| `//wards test protect\|shell\|hp\|shimmer\|expire\|impact <1-9999>\|both\|off` | Previews looks; `expire` plays glints and `impact <1-9999>` previews a manually supplied intensity. |
 | `//wards color protect\|shell <choice>` | Ring color, see below. |
 | `//wards height <0.25-3>` | Height span, same meaning as TargetSC `height` (default 0.66). |
 | `//wards scale <0.25-3>` | Ring size, same meaning as TargetSC `scale` (default 2). |
@@ -50,7 +52,9 @@ Copy the `Wards` folder into `Windower/addons/` (or download this repository and
 
 This experiment is on `development/protect-vfx-poc`; it is not part of `main` and has not yet been visually tested in FFXI. While Protect is present, a narrow blue band occasionally travels up or down the character. Most passes use one band; every fourth pass may use a second band moving the other way. Each band is a very faint core with a softer halo. It uses the existing ring geometry and depth testing, not a permanent aura or a particle system. The Protect ring remains independently controlled by `//wards protect`.
 
-`//wards shimmer on|off` controls the shimmer without changing the Protect ring. `//wards test shimmer` previews it without the buff. Defaults: opacity 0.16, period 4.8 seconds, duration 0.75 seconds. `//wards status` reports the toggle and tuning values. This first POC only implements the idle shimmer; expiration glints, the directional impact surface, honeycomb ripple and combat intensity are still pending.
+`//wards shimmer on|off` controls the shimmer without changing the Protect ring. `//wards test shimmer` previews it without the buff. Defaults: opacity 0.16, period 4.8 seconds, duration 0.75 seconds.
+
+When Protect disappears, `//wards glints on|off` controls four tiny hex glints dispersing over 0.5 seconds. `//wards impact on|off` controls a heading-oriented translucent shield and radial honeycomb ripple (0.48-second shield, 0.32-second ripple). `//wards test expire` previews the glints; `//wards test impact 1` through `9999` previews a chosen intensity without combat. A nonlinear `x^1.6` response keeps low values restrained. The packet path accepts completed melee and ranged hits on the local recipient while Protect is active. The packet only gives landed damage, used as an impact-severity proxy; it is not damage prevented. `//wards status` reports these settings.
 
 Settings are saved in `Wards/data/settings.xml`.
 
@@ -128,7 +132,9 @@ Wards hides itself while you're logged out, in cutscenes and events, and while z
 
 ## Changelog
 
-- **0.3.2-test5** (2026-11-26, POC branch): Adds a faint Protect idle shimmer and `//wards test shimmer`, with independent toggle and opacity/period/duration controls. Reuses the existing native ring renderer; no DLL or combat-event changes. Host-verified only; in-game appearance pending.
+- **0.3.3-test6** (2026-11-26, POC branch): Adds Protect expiry hex glints, a heading-oriented translucent shield with a honeycomb ripple, manual intensity preview (`1-9999`), and a restricted incoming melee/ranged hit listener. Renderer 0.16.0 adds native shield/hex geometry; CI strips and publishes its DLL. Landed damage is a severity proxy, not prevented damage. Host-verified; in-game appearance pending.
+
+- **0.3.2-test5** (2026-11-26, POC branch): Adds a faint Protect idle shimmer and `//wards test shimmer`, with independent toggle and opacity/period/duration controls. Reuses the existing native ring renderer; host-verified only; in-game appearance pending.
 
 - **0.3.1-test4** (2026-11-23): Crash fix, no visual change. Renderer 0.15.2: the shared scene hook no longer leaves renderer code on the stack while the game's frame runs, so `//lua unload`, `//lua reload` or `//wards restart` can't crash the client any more (it used to crash with `_Wards.dll_unloaded` or an unknown module). `//wards status` ends with `thunk` when the fix is active.
 
