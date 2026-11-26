@@ -1,9 +1,9 @@
 -- Host checks for wards_debuffs.lua (Lua 5.1). Run from the repo root:
---   lua5.1 Wards/tests/test_debuffs.lua
+--   lua5.1 tests/test_debuffs.lua
 -- Checks status IDs, that every look stays inside the DLL's argument ranges,
 -- the stack (order, slide, fade, cap), facing math and each look's motion.
 -- Not an FFXI test: it cannot show how the looks feel in game.
-package.path='Wards/?.lua;'..package.path
+package.path='./?.lua;'..package.path
 local D=require('wards_debuffs')
 local fails,passes=0,0
 local function check(cond,msg) if cond then passes=passes+1 else fails=fails+1 print('FAIL: '..msg) end end

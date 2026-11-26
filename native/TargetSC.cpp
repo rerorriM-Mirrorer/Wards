@@ -1,0 +1,1354 @@
+// TargetSC 0.5.0 — Author: A.
+// Device discovery, projection and model following adapted from Broguypal's
+// TargetRing (BSD-3-Clause); see licenses/ and THIRD_PARTY_NOTICES.md.
+// SceneHook.h (+ SceneHookThunk.h) is byte-identical between TargetSC and Wards.
+// 0.15.2: SceneHook owner thunks (safe //lua unload/reload of the frame owner).
+// Broguypal's TargetRing/Vanish use the older header; same bus ABI, they interoperate.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <tlhelp32.h>
+#include <d3d8.h>
+#include "SceneHook/SceneHook.h"
+#include "StrokeGeometry.h"
+#include "PropertyGeometry.h"
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <algorithm>
+namespace {
+using lua_State = struct lua_State;
+using lua_CFunction = int(__cdecl*)(lua_State*);
+
+using fn_createtable = void(__cdecl*)(lua_State*, int, int);
+using fn_pushcclosure = void(__cdecl*)(lua_State*, lua_CFunction, int);
+using fn_setfield = void(__cdecl*)(lua_State*, int, char const*);
+using fn_pushvalue = void(__cdecl*)(lua_State*, int);
+using fn_pushstring = void(__cdecl*)(lua_State*, char const*);
+using fn_gettop = int(__cdecl*)(lua_State*);
+using fn_tonumber = double(__cdecl*)(lua_State*, int);
+
+constexpr int kGlobalsIndex = -10002;
+
+struct LuaApi {
+    fn_createtable createtable = nullptr;
+    fn_pushcclosure pushcclosure = nullptr;
+    fn_setfield setfield = nullptr;
+    fn_pushvalue pushvalue = nullptr;
+    fn_pushstring pushstring = nullptr;
+    fn_gettop gettop = nullptr;
+    fn_tonumber tonumber = nullptr;
+
+    bool ready() const {
+        return createtable && pushcclosure && setfield && pushvalue
+            && pushstring && gettop && tonumber;
+    }
+};
+
+LuaApi g_lua {};
+
+struct Position {
+    float east = 0.0f;
+    float north = 0.0f;
+    float height = 0.0f;
+};
+
+struct DrawVertex {
+    float x;
+    float y;
+    float z;
+    float rhw;
+    DWORD color;
+};
+
+constexpr int kMaxRings=64; // 0.9.0: stacked opener section arcs
+constexpr int kMaxDiscs=16; // 0.10.0: MB burst blooms and their glyph copies
+constexpr int ring_slices_=64;
+constexpr DWORD kMaxIndex=0x900;
+constexpr std::uintptr_t kDisplayHeading=0x048;
+constexpr std::uintptr_t kEntityDisplayPos=0x004;
+constexpr std::uintptr_t kEntityDisplayPtr=0x0A0;
+constexpr std::uintptr_t kDisplayNameplateBase=0x678;
+constexpr std::uintptr_t kDisplayPosition=0x034;
+constexpr std::uintptr_t kEntityTargetType=0x0EE;
+constexpr unsigned char kTargetTypeObject=3;
+int g_object_mode=0;
+struct Ring {float radius=0, offset=0, width=0; DWORD color=0; float pixels=0;
+    int sectors=1;DWORD color2=0,color3=0,color4=0;float rotation=0,gap=0;int blend=0;
+    float fade=0,fade_length=1,fade_curve=1;int fade_direction=1;
+    int arc=0;float arc_start=0,arc_span=0;DWORD tail=0;
+    int camera=0; // 0.15.1: arc_start measured from the toward-camera direction
+    float dx=0,dy=0;}; // 0.12.0 sideways shift (east, north) from native.shift
+struct Disc {float radius=0,offset=0,rotation=0;DWORD color=0;int glyph=0;
+    DWORD outline=0;int sectors=1;DWORD color2=0,color3=0,color4=0;int blend=0;float inner=1.f,outer=1.f;
+    int has_hub=0;DWORD hub=0;
+    // 0.10.0: optional middle radial stop (alpha multiplier, radius fraction).
+    int has_mid=0;float mid=1.f,mid_pos=.5f;
+    float dx=0,dy=0; // 0.12.0 sideways shift
+    // 0.13.0: optional half-plane clip of the glyph lines and rim (SC kill
+    // halves): keep points p with p.x*clip_x+p.y*clip_y >= 0 (east/north).
+    int has_clip=0;float clip_x=0,clip_y=0;
+    // 0.14.0: sliced center (arg 18): each gradient fan slice's center corner
+    // takes that slice's own color instead of one shared averaged center.
+    int sliced=0;
+    // 0.15.0: glyph shimmer (args 19-23): a bright patch at world angle
+    // shimmer_angle on the glyph lines and rim; the far side alpha x far.
+    int has_shimmer=0;float shimmer_angle=0,shimmer_width=0,shimmer_far=1,shimmer_gain=0;int shimmer_count=1;};
+// 0.11.0: a 3D glyph (24 property-glyph segments, optional circle) for the
+// Umbra endings; geometry in PropertyGeometry.h (glyph3_*).
+constexpr int kMaxGlyphs3=4;
+struct Glyph3 {float radius=0,offset=0,rotation=0;DWORD color=0;targetsc::Glyph3Params params{};int clip=0,circle=0;
+    float dx=0,dy=0;};
+// 0.12.0: straight lines (kill seams), target-relative world units, z up.
+constexpr int kMaxLines=8;
+struct Line {float x1=0,y1=0,z1=0,x2=0,y2=0,z2=0;DWORD color=0;float pixels=1;};
+struct Frame {DWORD index=0, id=0, tick=0;int count=0,disc_count=0,glyph_count=0,line_count=0,shimmer_count=0;
+    float shift_e=0,shift_n=0; // current native.shift, stamped on each piece added after it
+    Ring rings[kMaxRings]{};Disc discs[kMaxDiscs]{};Glyph3 glyphs[kMaxGlyphs3]{};Line lines[kMaxLines]{};};
+SRWLOCK g_frame_lock=SRWLOCK_INIT;
+Frame g_pending{}, g_frame{};
+volatile LONG g_frames=0, g_draws=0, g_tracking_failures=0, g_state_failures=0;
+float ring_cos_[ring_slices_+1]{}, ring_sin_[ring_slices_+1]{};
+void build_tables() {
+    for (int i=0;i<=ring_slices_;++i) {
+        const float a=6.28318530718f*i/ring_slices_;
+        ring_cos_[i]=std::cos(a); ring_sin_[i]=std::sin(a);
+    }
+}
+SceneBus* g_bus = nullptr;
+int g_bus_slot = -1;
+std::uintptr_t g_renderer = 0;
+std::uintptr_t g_device = 0;
+std::uintptr_t g_last_renderer = 0;
+constexpr std::size_t kRendererScanWindow = 0x8000;
+constexpr std::size_t kDeviceVtableEntries = 90;
+constexpr unsigned long kDeviceRetryFrames = 30;
+constexpr unsigned long kMaxDeviceAttempts = 240;
+unsigned long g_device_frames = 0;
+unsigned long g_device_attempts = 0;
+char g_status[192] = "idle";
+
+bool page_readable(DWORD protect) {
+    if (protect & (PAGE_GUARD | PAGE_NOACCESS)) {
+        return false;
+    }
+
+    switch (protect & 0xFF) {
+    case PAGE_READONLY:
+    case PAGE_READWRITE:
+    case PAGE_WRITECOPY:
+    case PAGE_EXECUTE_READ:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool page_executable(DWORD protect) {
+    if (protect & (PAGE_GUARD | PAGE_NOACCESS)) {
+        return false;
+    }
+
+    switch (protect & 0xFF) {
+    case PAGE_EXECUTE:
+    case PAGE_EXECUTE_READ:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool span_readable(std::uintptr_t address, std::size_t size) {
+    if (address == 0 || size == 0) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION region {};
+    if (!VirtualQuery(reinterpret_cast<void const*>(address), &region, sizeof(region))) {
+        return false;
+    }
+
+    if (region.State != MEM_COMMIT || !page_readable(region.Protect)) {
+        return false;
+    }
+
+    std::uintptr_t const low = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
+    return address >= low && address + size <= low + region.RegionSize;
+}
+
+bool module_range_from_handle(HMODULE module, std::uintptr_t& base, std::size_t& size) {
+    base = 0;
+    size = 0;
+
+    if (!module) {
+        return false;
+    }
+
+    base = reinterpret_cast<std::uintptr_t>(module);
+    if (!span_readable(base, sizeof(IMAGE_DOS_HEADER))) {
+        return false;
+    }
+
+    auto const* dos = reinterpret_cast<IMAGE_DOS_HEADER const*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return false;
+    }
+
+    std::uintptr_t const nt_address = base + static_cast<std::uintptr_t>(dos->e_lfanew);
+    if (!span_readable(nt_address, sizeof(IMAGE_NT_HEADERS32))) {
+        return false;
+    }
+
+    auto const* nt = reinterpret_cast<IMAGE_NT_HEADERS32 const*>(nt_address);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        return false;
+    }
+
+    size = nt->OptionalHeader.SizeOfImage;
+    return size != 0;
+}
+
+bool module_range(char const* name, std::uintptr_t& base, std::size_t& size) {
+    return module_range_from_handle(GetModuleHandleA(name), base, size);
+}
+
+std::uintptr_t scan_module(char const* name, unsigned char const* pattern,
+    char const* mask, std::size_t length) {
+    std::uintptr_t base = 0;
+    std::size_t image = 0;
+    if (!module_range(name, base, image)) {
+        return 0;
+    }
+
+    auto const* dos = reinterpret_cast<IMAGE_DOS_HEADER const*>(base);
+    auto const* nt = reinterpret_cast<IMAGE_NT_HEADERS32 const*>(
+        base + static_cast<std::uintptr_t>(dos->e_lfanew));
+
+    auto const* section = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) {
+            continue;
+        }
+
+        std::uintptr_t const start = base + section->VirtualAddress;
+        std::size_t const span = section->Misc.VirtualSize;
+        if (span <= length || !span_readable(start, span)) {
+            continue;
+        }
+
+        auto const* bytes = reinterpret_cast<unsigned char const*>(start);
+        for (std::size_t offset = 0; offset + length <= span; ++offset) {
+            bool hit = true;
+            for (std::size_t j = 0; j < length; ++j) {
+                if (mask[j] != '?' && bytes[offset + j] != pattern[j]) {
+                    hit = false;
+                    break;
+                }
+            }
+
+            if (hit) {
+                return start + offset;
+            }
+        }
+    }
+
+    return 0;
+}
+
+void* vtable_slot(std::uintptr_t object, int index) {
+    if (!span_readable(object, sizeof(std::uintptr_t))) {
+        return nullptr;
+    }
+
+    std::uintptr_t vtable = 0;
+    std::memcpy(&vtable, reinterpret_cast<void const*>(object), sizeof(vtable));
+
+    std::uintptr_t const entry = vtable + static_cast<std::uintptr_t>(index) * sizeof(std::uintptr_t);
+    if (!span_readable(entry, sizeof(std::uintptr_t))) {
+        return nullptr;
+    }
+
+    std::uintptr_t address = 0;
+    std::memcpy(&address, reinterpret_cast<void const*>(entry), sizeof(address));
+    return reinterpret_cast<void*>(address);
+}
+
+using fn_release = unsigned long(__stdcall*)(void*);
+void* d3d_device_=nullptr;
+std::uintptr_t g_entity_array = 0;
+bool g_entity_array_resolved = false;
+
+// mov edx,[esi+0xC] / mov eax,[edx+ebp] / mov eax,[eax*4+imm32] -- the trailing
+// imm32 is the array base itself, not a pointer to it.
+std::uintptr_t entity_array() {
+    if (g_entity_array_resolved) {
+        return g_entity_array;
+    }
+
+    g_entity_array_resolved = true;
+
+    static unsigned char const pattern[] = {
+        0x8B, 0x56, 0x0C, 0x8B, 0x04, 0x2A, 0x8B, 0x04, 0x85,
+    };
+    static char const mask[] = "xxxxxxxxx";
+
+    std::uintptr_t const match = scan_module("FFXiMain.dll", pattern, mask, sizeof(pattern));
+    if (match == 0) {
+        return 0;
+    }
+
+    std::uint32_t base = 0;
+    if (!span_readable(match + sizeof(pattern), sizeof(base))) {
+        return 0;
+    }
+
+    std::memcpy(&base, reinterpret_cast<void const*>(match + sizeof(pattern)), sizeof(base));
+    if (!span_readable(base, sizeof(std::uintptr_t) * kMaxIndex)) {
+        return 0;
+    }
+
+    g_entity_array = base;
+    return g_entity_array;
+}
+
+bool live_position(DWORD index, Position& out, float* heading_out) {
+    std::uintptr_t const base = entity_array();
+    if (base == 0 || index == 0 || index >= kMaxIndex) {
+        return false;
+    }
+
+    std::uintptr_t const slot = base + static_cast<std::uintptr_t>(index) * sizeof(std::uintptr_t);
+    if (!span_readable(slot, sizeof(std::uintptr_t))) {
+        return false;
+    }
+
+    std::uintptr_t entity = 0;
+    std::memcpy(&entity, reinterpret_cast<void const*>(slot), sizeof(entity));
+    if (entity == 0) {
+        return false;
+    }
+
+    float coords[3] {};
+    bool have = false;
+
+    unsigned char target_type = 0;
+    if (span_readable(entity + kEntityTargetType, sizeof(target_type))) {
+        std::memcpy(&target_type, reinterpret_cast<void const*>(entity + kEntityTargetType),
+            sizeof(target_type));
+    }
+
+    const bool is_object = target_type == kTargetTypeObject;
+    if (is_object && g_object_mode == 1) {
+        return false;
+    }
+
+    const std::uintptr_t position_field = (is_object && g_object_mode == 0)
+        ? kDisplayPosition : kDisplayNameplateBase;
+
+    if (span_readable(entity + kEntityDisplayPtr, sizeof(std::uintptr_t))) {
+        std::uintptr_t display = 0;
+        std::memcpy(&display, reinterpret_cast<void const*>(entity + kEntityDisplayPtr), sizeof(display));
+        if (display != 0 && span_readable(display + position_field, sizeof(float) * 3)) {
+            std::memcpy(coords, reinterpret_cast<void const*>(display + position_field),
+                sizeof(coords));
+            have = true;
+
+            if (heading_out && span_readable(display + kDisplayHeading, sizeof(float))) {
+                float heading = 0.0f;
+                std::memcpy(&heading, reinterpret_cast<void const*>(display + kDisplayHeading),
+                    sizeof(heading));
+                if (std::isfinite(heading)) {
+                    *heading_out = heading;
+                }
+            }
+        }
+    }
+
+    if (!have) {
+        if (!span_readable(entity + kEntityDisplayPos, sizeof(float) * 3)) {
+            return false;
+        }
+
+        std::memcpy(coords, reinterpret_cast<void const*>(entity + kEntityDisplayPos), sizeof(coords));
+    }
+
+    if (!std::isfinite(coords[0]) || !std::isfinite(coords[1]) || !std::isfinite(coords[2])
+        || std::fabs(coords[0]) > 10000.0f || std::fabs(coords[1]) > 10000.0f
+        || std::fabs(coords[2]) > 10000.0f) {
+        return false;
+    }
+
+    out.east = coords[0];
+    out.height = coords[1];
+    out.north = coords[2];
+    return true;
+}
+
+bool plausible_device_vtable(std::uintptr_t vtable) {
+    if (!span_readable(vtable, sizeof(std::uintptr_t) * kDeviceVtableEntries)) {
+        return false;
+    }
+
+    static int const probes[] = { 2, 35, 41, 72 };
+    for (int slot : probes) {
+        std::uintptr_t entry = 0;
+        std::memcpy(&entry,
+            reinterpret_cast<void const*>(vtable + static_cast<std::uintptr_t>(slot) * sizeof(std::uintptr_t)),
+            sizeof(entry));
+        if (entry == 0) {
+            return false;
+        }
+
+        MEMORY_BASIC_INFORMATION region {};
+        if (!VirtualQuery(reinterpret_cast<void const*>(entry), &region, sizeof(region))
+            || region.State != MEM_COMMIT
+            || !page_executable(region.Protect)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+constexpr std::size_t kMaxD3DModules = 8;
+
+struct D3DModuleRange {
+    std::uintptr_t base;
+    std::size_t size;
+};
+
+GUID const kIidDevice8 =
+    { 0x7385E5DF, 0x8FE8, 0x41D5, { 0x86, 0xB6, 0xD7, 0xB4, 0x85, 0x47, 0xB6, 0xCF } };
+GUID const kIidBaseTexture8 =
+    { 0xB4211CFA, 0x51B9, 0x4A9F, { 0xAB, 0x78, 0xDB, 0x99, 0xB2, 0xBB, 0x67, 0x8E } };
+GUID const kIidTexture8 =
+    { 0xE4CDD575, 0x2866, 0x4F01, { 0xB1, 0x2E, 0x7E, 0xEC, 0xE1, 0xEC, 0x93, 0x58 } };
+GUID const kIidSurface8 =
+    { 0xB96EEBCA, 0xB326, 0x4EA5, { 0x88, 0x2F, 0x2F, 0xF5, 0xBA, 0xE0, 0x21, 0xDD } };
+GUID const kIidVertexBuffer8 =
+    { 0x8AEEEAC7, 0x05F9, 0x44D4, { 0xB5, 0x91, 0x00, 0x0B, 0x0D, 0xF1, 0xCB, 0x95 } };
+GUID const kIidIndexBuffer8 =
+    { 0x0E689C9A, 0x053D, 0x44A0, { 0x9D, 0x92, 0xDB, 0x0E, 0x3D, 0x75, 0x0F, 0x86 } };
+GUID const kIidResource8 =
+    { 0x1B36BB7B, 0x09B7, 0x410A, { 0xB4, 0x45, 0x7D, 0x14, 0x30, 0xD7, 0xB3, 0x3F } };
+
+GUID const* const kResourceIids[] = {
+    &kIidBaseTexture8, &kIidTexture8, &kIidSurface8,
+    &kIidVertexBuffer8, &kIidIndexBuffer8, &kIidResource8,
+};
+
+#if defined(__GNUC__)
+__attribute__((noinline, optimize("no-omit-frame-pointer")))
+long call_com_2(void* fn, void* object, void* a) {
+    long result = 0;
+    __asm__ __volatile__(
+        "movl %%esp, %%ebx\n\t"
+        "pushl %2\n\t"
+        "pushl %3\n\t"
+        "call *%1\n\t"
+        "movl %%ebx, %%esp\n\t"
+        : "=a"(result)
+        : "m"(fn), "m"(a), "m"(object)
+        : "ebx", "ecx", "edx", "memory", "cc");
+    return result;
+}
+
+__attribute__((noinline, optimize("no-omit-frame-pointer")))
+long call_com_3(void* fn, void* object, void* a, void* b) {
+    long result = 0;
+    __asm__ __volatile__(
+        "movl %%esp, %%ebx\n\t"
+        "pushl %2\n\t"
+        "pushl %3\n\t"
+        "pushl %4\n\t"
+        "call *%1\n\t"
+        "movl %%ebx, %%esp\n\t"
+        : "=a"(result)
+        : "m"(fn), "m"(b), "m"(a), "m"(object)
+        : "ebx", "ecx", "edx", "memory", "cc");
+    return result;
+}
+
+#else
+long call_com_2(void* fn, void* object, void* a) {
+    return reinterpret_cast<long(__stdcall*)(void*,void*)>(fn)(object,a);
+}
+long call_com_3(void* fn, void* object, void* a, void* b) {
+    return reinterpret_cast<long(__stdcall*)(void*,void*,void*)>(fn)(object,a,b);
+}
+#endif
+void release_com(void* object) {
+    if (!object) {
+        return;
+    }
+    auto release = reinterpret_cast<fn_release>(
+        vtable_slot(reinterpret_cast<std::uintptr_t>(object), 2));
+    if (release) {
+        release(object);
+    }
+}
+
+bool query_interface(std::uintptr_t object, GUID const& iid, void*& out) {
+    out = nullptr;
+
+    void* fn = vtable_slot(object, 0);
+    if (!fn) {
+        return false;
+    }
+
+    long const hr = call_com_3(fn, reinterpret_cast<void*>(object),
+        const_cast<GUID*>(&iid), &out);
+    if (hr < 0 || out == nullptr) {
+        out = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void owning_module_name(std::uintptr_t address, char* out, std::size_t size) {
+    if (size == 0) {
+        return;
+    }
+    out[0] = '\0';
+
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<char const*>(address), &module)
+        || !module) {
+        return;
+    }
+
+    char path[MAX_PATH] {};
+    if (GetModuleFileNameA(module, path, MAX_PATH) == 0) {
+        return;
+    }
+
+    char const* leaf = std::strrchr(path, '\\');
+    leaf = leaf ? leaf + 1 : path;
+    std::snprintf(out, size, "%s", leaf);
+}
+
+std::size_t collect_d3d8_modules(D3DModuleRange* out, std::size_t capacity) {
+    std::size_t count = 0;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    MODULEENTRY32 entry {};
+    entry.dwSize = sizeof(entry);
+    if (Module32First(snapshot, &entry)) {
+        do {
+            if (count >= capacity) {
+                break;
+            }
+            if (!entry.hModule || !GetProcAddress(entry.hModule, "Direct3DCreate8")) {
+                continue;
+            }
+
+            std::uintptr_t base = 0;
+            std::size_t size = 0;
+            if (!module_range_from_handle(entry.hModule, base, size)) {
+                continue;
+            }
+
+            out[count].base = base;
+            out[count].size = size;
+            ++count;
+        } while (Module32Next(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return count;
+}
+
+bool vtable_in_d3d8_module(
+    std::uintptr_t vtable, D3DModuleRange const* modules, std::size_t count) {
+    for (std::size_t index = 0; index < count; ++index) {
+        if (vtable >= modules[index].base
+            && vtable < modules[index].base + modules[index].size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool candidate_at(
+    std::uintptr_t slot, D3DModuleRange const* modules, std::size_t count,
+    std::uintptr_t& object) {
+    if (!span_readable(slot, sizeof(std::uintptr_t))) {
+        return false;
+    }
+
+    object = 0;
+    std::memcpy(&object, reinterpret_cast<void const*>(slot), sizeof(object));
+    if (object == 0 || !span_readable(object, sizeof(std::uintptr_t))) {
+        return false;
+    }
+
+    std::uintptr_t vtable = 0;
+    std::memcpy(&vtable, reinterpret_cast<void const*>(object), sizeof(vtable));
+    return vtable_in_d3d8_module(vtable, modules, count);
+}
+
+bool adopt_device(
+    void* device, char const* how, D3DModuleRange const* modules, std::size_t count) {
+    std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(device);
+    if (!span_readable(address, sizeof(std::uintptr_t))) {
+        return false;
+    }
+
+    std::uintptr_t device_vtable = 0;
+    std::memcpy(&device_vtable, device, sizeof(device_vtable));
+    if (!vtable_in_d3d8_module(device_vtable, modules, count)
+        && !plausible_device_vtable(device_vtable)) {
+        return false;
+    }
+
+    g_device = address;
+    d3d_device_ = device;
+
+    char owner[64] {};
+    owning_module_name(device_vtable, owner, sizeof(owner));
+    std::snprintf(g_status, sizeof(g_status), "running (%s, device in %s)",
+        how, owner[0] ? owner : "unknown module");
+    return true;
+}
+
+void acquire_device(std::uintptr_t renderer) {
+    if (renderer == 0) {
+        return;
+    }
+
+    if (renderer != g_last_renderer) {
+        g_last_renderer = renderer;
+        d3d_device_ = nullptr;
+        g_device = 0;
+        g_device_attempts = 0;
+        g_device_frames = 0;
+    }
+
+    if (d3d_device_ || g_device_attempts >= kMaxDeviceAttempts) {
+        return;
+    }
+
+    ++g_device_frames;
+    if (g_device_attempts != 0 && (g_device_frames % kDeviceRetryFrames) != 0) {
+        return;
+    }
+
+    ++g_device_attempts;
+
+    D3DModuleRange modules[kMaxD3DModules] {};
+    std::size_t const module_count = collect_d3d8_modules(modules, kMaxD3DModules);
+    if (module_count == 0) {
+        std::snprintf(g_status, sizeof(g_status), "no d3d8 implementation found");
+        return;
+    }
+
+    // An unreadable slot is skipped rather than ending the scan; the renderer
+    // has gaps and the device resource can sit past them.
+    for (std::size_t offset = 0; offset + 4 <= kRendererScanWindow; offset += 4) {
+        std::uintptr_t object = 0;
+        if (!candidate_at(renderer + offset, modules, module_count, object)) {
+            continue;
+        }
+
+        void* device = nullptr;
+        if (!query_interface(object, kIidDevice8, device)) {
+            continue;
+        }
+
+        bool const adopted = adopt_device(device, "direct", modules, module_count);
+        release_com(device);
+        if (adopted) {
+            return;
+        }
+    }
+
+    for (std::size_t offset = 0; offset + 4 <= kRendererScanWindow; offset += 4) {
+        std::uintptr_t object = 0;
+        if (!candidate_at(renderer + offset, modules, module_count, object)) {
+            continue;
+        }
+
+        bool confirmed = false;
+        for (GUID const* iid : kResourceIids) {
+            void* resource = nullptr;
+            if (query_interface(object, *iid, resource)) {
+                release_com(resource);
+                confirmed = true;
+                break;
+            }
+        }
+        if (!confirmed) {
+            continue;
+        }
+
+        void* get_device = vtable_slot(object, 3);
+        if (!get_device) {
+            continue;
+        }
+
+        void* device = nullptr;
+        long const hr = call_com_2(get_device, reinterpret_cast<void*>(object), &device);
+        if (hr < 0 || !device) {
+            continue;
+        }
+
+        bool const adopted = adopt_device(device, "resource", modules, module_count);
+        release_com(device);
+        if (adopted) {
+            return;
+        }
+    }
+
+    std::snprintf(g_status, sizeof(g_status), "device not found in renderer (try %lu)",
+        g_device_attempts);
+}
+
+
+D3DMATRIX g_vp{};
+float g_camera_angle=0.f; // 0.15.1: toward-camera angle at the drawn entity, this frame
+bool project(Position const& p,D3DVIEWPORT8 const& v, DrawVertex& out,DWORD color) {
+    const float x=p.east,y=p.height,z=p.north;
+    const float w=x*g_vp.m[0][3]+y*g_vp.m[1][3]+z*g_vp.m[2][3]+g_vp.m[3][3];
+    if (!std::isfinite(w)||w<=0.001f) return false;
+    const float cx=x*g_vp.m[0][0]+y*g_vp.m[1][0]+z*g_vp.m[2][0]+g_vp.m[3][0];
+    const float cy=x*g_vp.m[0][1]+y*g_vp.m[1][1]+z*g_vp.m[2][1]+g_vp.m[3][1];
+    const float cz=x*g_vp.m[0][2]+y*g_vp.m[1][2]+z*g_vp.m[2][2]+g_vp.m[3][2];
+    if (!std::isfinite(cx)||!std::isfinite(cy)||!std::isfinite(cz)||cz<0||cz>w) return false;
+    out={v.X+(cx/w+1)*v.Width*.5f,v.Y+(1-cy/w)*v.Height*.5f,
+         v.MinZ+(cz/w)*(v.MaxZ-v.MinZ),1/w,color};
+    return true;
+}
+// Bounded storage reused by the render thread: no per-frame allocations.
+// 0.10.0: a disc fill may be a center fan plus a middle-to-rim annulus
+// (3+6 vertices per slice) when it carries a middle radial stop.
+constexpr int kMaxShimmerDiscs=4; // 0.15.0: discs per frame drawn with a glyph shimmer
+constexpr int kMaxVertices=(kMaxRings+kMaxDiscs)*ring_slices_*6+
+    kMaxDiscs*(ring_slices_*9+targetsc::kGlyphLines*6)+
+    kMaxShimmerDiscs*targetsc::kGlyphLines*targetsc::kShimmerPieces*6+ // 0.15.0 subdivided lines
+    kMaxGlyphs3*(targetsc::kGlyphLines+ring_slices_)*6+ // 0.11.0 3D glyph lines + circle
+    kMaxLines*6; // 0.12.0 seam lines
+// 0.13.0: 20 glyph lines (cap lines removed); a clipped disc rim draws at most
+// ring_slices_ strokes, inside its ring_slices_*6 allowance above.
+static_assert(kMaxVertices==47760,"Review bounded storage when glyph complexity changes");
+DrawVertex g_vertices[kMaxVertices]{};
+unsigned g_vertex_count=0;
+void triangle(DrawVertex a,DrawVertex b,DrawVertex c) {
+    if(g_vertex_count+3>kMaxVertices)return;
+    g_vertices[g_vertex_count++]=a;g_vertices[g_vertex_count++]=b;g_vertices[g_vertex_count++]=c;
+}
+// 0.9.0 section arc: one open arc from arc_start over arc_span (radians),
+// lead->tail color and alpha along it, same projection/width as rings.
+void emit_arc(Position const& base,Ring const& ring,D3DVIEWPORT8 const& viewport) {
+    constexpr int P=ring_slices_/2+1;
+    DrawVertex points[P]{};bool valid[P]{};float widths[P]{};
+    for(int i=0;i<P;++i) {
+        const float angle=ring.arc_start+ring.arc_span*static_cast<float>(i)/(P-1)+ring.rotation+(ring.camera?g_camera_angle:0.f);
+        const float x=std::cos(angle),y=std::sin(angle);
+        Position p{base.east+ring.radius*x,base.north+ring.radius*y,base.height-ring.offset};
+        valid[i]=project(p,viewport,points[i],ring.color);
+        DrawVertex inner{},outer{};
+        Position a{base.east+(ring.radius-ring.width*.5f)*x,base.north+(ring.radius-ring.width*.5f)*y,p.height};
+        Position b{base.east+(ring.radius+ring.width*.5f)*x,base.north+(ring.radius+ring.width*.5f)*y,p.height};
+        const float natural=(project(a,viewport,inner,ring.color)&&project(b,viewport,outer,ring.color))
+            ? std::hypot(outer.x-inner.x,outer.y-inner.y):0.f;
+        widths[i]=targetsc::visible_width(natural,ring.pixels);
+    }
+    DrawVertex inside[P]{},outside[P]{};
+    for(int i=0;i<P;++i) {
+        if(!valid[i])continue;
+        const int prev=i==0?i:i-1,next=i==P-1?i:i+1;
+        auto const& p=points[i];
+        auto const& a=valid[prev]?points[prev]:p;
+        auto const& b=valid[next]?points[next]:p;
+        const auto d=targetsc::stroke_offset({a.x,a.y},{p.x,p.y},{b.x,b.y},widths[i]*.5f);
+        inside[i]=p;outside[i]=p;inside[i].x-=d.x;inside[i].y-=d.y;
+        outside[i].x+=d.x;outside[i].y+=d.y;
+    }
+    for(int i=0;i<P-1;++i) {
+        if(!valid[i]||!valid[i+1])continue;
+        auto a=inside[i],b=outside[i],c=inside[i+1],d=outside[i+1];
+        a.color=b.color=targetsc::arc_color(ring.color,ring.tail,i,P,ring.fade,ring.fade_length,ring.fade_curve,ring.fade_direction);
+        c.color=d.color=targetsc::arc_color(ring.color,ring.tail,i+1,P,ring.fade,ring.fade_length,ring.fade_curve,ring.fade_direction);
+        triangle(a,b,c);triangle(c,b,d);
+    }
+}
+void emit_ring(Position const& base,Ring const& ring,D3DVIEWPORT8 const& viewport) {
+    if(ring.arc){emit_arc(base,ring,viewport);return;}
+    const bool open=ring.gap>0;
+    const int point_count=ring_slices_+(open?2:0);
+    DrawVertex points[ring_slices_+2]{};bool valid[ring_slices_+2]{};
+    float widths[ring_slices_+2]{};
+    const float cr=std::cos(ring.rotation),sr=std::sin(ring.rotation);
+    for(int i=0;i<point_count;++i) {
+        const float angle=targetsc::ring_angle(i,ring_slices_,ring.gap);
+        const float ca=open?std::cos(angle):ring_cos_[i],sa=open?std::sin(angle):ring_sin_[i];
+        const float x=ca*cr-sa*sr,y=sa*cr+ca*sr;
+        Position p{base.east+ring.radius*x,base.north+ring.radius*y,base.height-ring.offset};
+        valid[i]=project(p,viewport,points[i],ring.color);
+        DrawVertex inner{},outer{};
+        Position a{base.east+(ring.radius-ring.width*.5f)*x,base.north+(ring.radius-ring.width*.5f)*y,p.height};
+        Position b{base.east+(ring.radius+ring.width*.5f)*x,base.north+(ring.radius+ring.width*.5f)*y,p.height};
+        const float natural=(project(a,viewport,inner,ring.color)&&project(b,viewport,outer,ring.color))
+            ? std::hypot(outer.x-inner.x,outer.y-inner.y):0.f;
+        widths[i]=targetsc::visible_width(natural,ring.pixels);
+    }
+    DrawVertex inside[ring_slices_+2]{},outside[ring_slices_+2]{};
+    for(int i=0;i<point_count;++i) {
+        if(!valid[i])continue;
+        const bool first=open&&(i==0||i==ring_slices_/2+1);
+        const bool last=open&&(i==ring_slices_/2||i==point_count-1);
+        const int prev=first?i:open?i-1:(i+ring_slices_-1)%ring_slices_;
+        const int next=last?i:open?i+1:(i+1)%ring_slices_;
+        auto const& p=points[i];
+        auto const& a=valid[prev]?points[prev]:p;
+        auto const& b=valid[next]?points[next]:p;
+        const auto d=targetsc::stroke_offset({a.x,a.y},{p.x,p.y},{b.x,b.y},widths[i]*.5f);
+        // Keep centerline projected depth/rhw on both sides of the thin stroke.
+        // Screen-space widening must never put a vertex on the near plane.
+        inside[i]=p;outside[i]=p;inside[i].x-=d.x;inside[i].y-=d.y;
+        outside[i].x+=d.x;outside[i].y+=d.y;
+    }
+    for(int i=0;i<ring_slices_;++i) {
+        const int start=open&&i>=ring_slices_/2?i+1:i;
+        const int n=open?start+1:(i+1)%ring_slices_;
+        if(!valid[start]||!valid[n])continue;
+        const DWORD palette[]={ring.color,ring.color2,ring.color3,ring.color4};
+        const DWORD color=palette[targetsc::sector_index(i,ring_slices_,ring.sectors)];
+        // Each arc shares exactly the same joined centerline; duplicate only
+        // the color at a sector boundary, avoiding interpolation or any gap.
+        auto a=inside[start],b=outside[start],c=inside[n],d=outside[n];
+        a.color=b.color=c.color=d.color=color;
+        if(open && ring.fade>0.f) {
+            // 0.8.0: alpha fades along each open arc from its bright end.
+            const int per_arc=ring_slices_/2+1;
+            const float ka=targetsc::arc_fade(start%per_arc,per_arc,ring.fade,ring.fade_length,ring.fade_curve,ring.fade_direction);
+            const float kn=targetsc::arc_fade(n%per_arc,per_arc,ring.fade,ring.fade_length,ring.fade_curve,ring.fade_direction);
+            a.color=b.color=targetsc::scale_alpha(color,ka);
+            c.color=d.color=targetsc::scale_alpha(color,kn);
+        }
+        if(ring.blend && ring.sectors>1 && !open) {
+            // 0.6.0 gradient: each vertex takes the blended color at its own
+            // angle, so the closed ring shades smoothly through its colors in
+            // the SAME order (and direction) as the split sectors it replaces.
+            const std::uint32_t packed[]={palette[0],palette[1],palette[2],palette[3]};
+            a.color=b.color=targetsc::gradient_at(packed,ring.sectors,static_cast<float>(i),ring_slices_);
+            c.color=d.color=targetsc::gradient_at(packed,ring.sectors,static_cast<float>(i+1),ring_slices_);
+        }
+        triangle(a,b,c);triangle(c,b,d);
+    }
+}
+void emit_disc(Position const& base,Disc const& disc,D3DVIEWPORT8 const& viewport) {
+    const Position center{base.east,base.north,base.height-disc.offset};
+    DrawVertex hub{};if(!project(center,viewport,hub,disc.color))return;
+    // Translucent colored fill is deliberate ground glyph geometry, not a
+    // filled backdrop beneath the rings. No texture/D3DX dependency is added.
+    DrawVertex edge[ring_slices_]{};bool valid[ring_slices_]{};
+    const float cr=std::cos(disc.rotation),sr=std::sin(disc.rotation);
+    for(int i=0;i<ring_slices_;++i) {
+        Position p{center.east+disc.radius*(ring_cos_[i]*cr-ring_sin_[i]*sr),
+            center.north+disc.radius*(ring_sin_[i]*cr+ring_cos_[i]*sr),center.height};
+        valid[i]=project(p,viewport,edge[i],disc.color);
+    }
+    const DWORD palette[]={disc.color,disc.color2,disc.color3,disc.color4};
+    // 0.10.0 middle stop: a second ring of projected points at mid_pos.
+    DrawVertex middle[ring_slices_]{};bool middle_ok[ring_slices_]{};
+    const bool staged=disc.has_mid && disc.glyph!=2 && (disc.color>>24);
+    if(staged)for(int i=0;i<ring_slices_;++i) {
+        const float r=disc.radius*disc.mid_pos;
+        Position p{center.east+r*(ring_cos_[i]*cr-ring_sin_[i]*sr),
+            center.north+r*(ring_sin_[i]*cr+ring_cos_[i]*sr),center.height};
+        middle_ok[i]=project(p,viewport,middle[i],disc.color);
+    }
+    // One fill slice: hub->rim triangle, or hub->middle plus middle->rim
+    // quad when staged. Colors here are already alpha-scaled.
+    auto slice=[&](int i,int n,DWORD hub_color,DWORD rim_i,DWORD rim_n,DWORD mid_i,DWORD mid_n) {
+        if(!valid[i]||!valid[n])return;
+        if(!staged){auto a=hub,b=edge[i],c=edge[n];a.color=hub_color;b.color=rim_i;c.color=rim_n;triangle(a,b,c);return;}
+        if(!middle_ok[i]||!middle_ok[n])return;
+        auto a=hub,b=middle[i],c=middle[n];a.color=hub_color;b.color=mid_i;c.color=mid_n;triangle(a,b,c);
+        auto d=middle[i],e=edge[i],f=middle[n],g=edge[n];
+        d.color=mid_i;e.color=rim_i;f.color=mid_n;g.color=rim_n;triangle(d,e,f);triangle(f,e,g);
+    };
+    if(disc.glyph!=2 && (disc.color>>24) && disc.blend && disc.sectors>1) {
+        // 0.6.0 gradient: each rim vertex blends the neighbouring sector
+        // colors; the hub carries their average. D3D's Gouraud shading then
+        // interpolates smoothly across every fan triangle (no texture).
+        const std::uint32_t packed[]={palette[0],palette[1],palette[2],palette[3]};
+        DWORD rim[ring_slices_]{};
+        for(int i=0;i<ring_slices_;++i)rim[i]=targetsc::gradient_at(packed,disc.sectors,static_cast<float>(i),ring_slices_);
+        // 0.7.0 radial: inner/outer scale hub and rim alpha independently.
+        const DWORD raw_center=disc.has_hub?static_cast<std::uint32_t>(disc.hub)
+            :targetsc::average_color(packed,disc.sectors);
+        const DWORD center=targetsc::scale_alpha(raw_center,disc.inner);
+        DWORD mid[ring_slices_]{};
+        for(int i=0;i<ring_slices_;++i)mid[i]=targetsc::radial_mid(raw_center,rim[i],disc.mid_pos,disc.mid);
+        DWORD raw_rim[ring_slices_]{};
+        for(int i=0;i<ring_slices_;++i)raw_rim[i]=rim[i];
+        for(int i=0;i<ring_slices_;++i)rim[i]=targetsc::scale_alpha(rim[i],disc.outer);
+        for(int i=0;i<ring_slices_;++i) {
+            const int n=(i+1)%ring_slices_;
+            if(disc.sliced) {
+                // 0.14.0: this slice's own center color (and middle stop from it).
+                const DWORD own=targetsc::sliced_center(packed,disc.sectors,i,ring_slices_);
+                slice(i,n,targetsc::scale_alpha(own,disc.inner),rim[i],rim[n],
+                    targetsc::radial_mid(own,raw_rim[i],disc.mid_pos,disc.mid),targetsc::radial_mid(own,raw_rim[n],disc.mid_pos,disc.mid));
+            } else slice(i,n,center,rim[i],rim[n],mid[i],mid[n]);
+        }
+    } else if(disc.glyph!=2 && (disc.color>>24))for(int i=0;i<ring_slices_;++i) {
+        const int n=(i+1)%ring_slices_;
+        if(!valid[i]||!valid[n])continue;
+        const DWORD color=palette[targetsc::sector_index(i,ring_slices_,disc.sectors)];
+        // 0.7.0 radial: Gouraud shading fades hub alpha (inner) to rim (outer).
+        const DWORD raw_center=disc.has_hub?disc.hub:color;
+        const DWORD rim_color=targetsc::scale_alpha(color,disc.outer);
+        const DWORD mid_color=targetsc::radial_mid(raw_center,color,disc.mid_pos,disc.mid);
+        slice(i,n,targetsc::scale_alpha(raw_center,disc.inner),rim_color,rim_color,mid_color,mid_color);
+    }
+    if(!disc.glyph || !(disc.outline>>24))return;
+    // 0.15.0 shimmer: each stroke end takes its own shimmered color.
+    auto shade=[&](targetsc::GlyphPoint p)->DWORD {
+        if(!disc.has_shimmer)return disc.outline;
+        const float w=targetsc::shimmer_weight(std::atan2(p.y,p.x),disc.shimmer_angle,disc.shimmer_width,disc.shimmer_count);
+        return static_cast<DWORD>(targetsc::shimmer_color(static_cast<std::uint32_t>(disc.outline),w,disc.shimmer_far,disc.shimmer_gain));
+    };
+    // 1-pixel stroke between two points in the disc's rotated frame (glyph
+    // units), clipped to the 0.13.0 half-plane when the disc has one.
+    auto stroke=[&](targetsc::GlyphPoint pa,targetsc::GlyphPoint pb) {
+        if(disc.has_clip&&!targetsc::half_clip(pa,pb,disc.clip_x,disc.clip_y))return;
+        DrawVertex a{},b{};
+        if(!project(Position{center.east+disc.radius*pa.x,center.north+disc.radius*pa.y,center.height},viewport,a,shade(pa))||
+           !project(Position{center.east+disc.radius*pb.x,center.north+disc.radius*pb.y,center.height},viewport,b,shade(pb)))return;
+        const float dx=b.x-a.x,dy=b.y-a.y,length=std::hypot(dx,dy);
+        if(length<.0001f)return;
+        const float nx=-dy*.5f/length,ny=dx*.5f/length;
+        auto c=a,d=b;a.x-=nx;a.y-=ny;b.x-=nx;b.y-=ny;
+        c.x+=nx;c.y+=ny;d.x+=nx;d.y+=ny;triangle(a,c,b);triangle(b,c,d);
+    };
+    auto rotated=[&](targetsc::GlyphPoint p){return targetsc::GlyphPoint{p.x*cr-p.y*sr,p.x*sr+p.y*cr};};
+    static const auto lines=targetsc::property_glyph();
+    if(disc.has_clip||disc.has_shimmer) {
+        // Half rim + half glyph, both clipped to the same half-plane; with
+        // a 0.15.0 shimmer each glyph line is cut into kShimmerPieces strokes.
+        for(int i=0;i<ring_slices_;++i) {
+            const int n=(i+1)%ring_slices_;
+            stroke({ring_cos_[i],ring_sin_[i]},{ring_cos_[n],ring_sin_[n]});
+        }
+        const int pieces=disc.has_shimmer?targetsc::kShimmerPieces:1;
+        for(auto const& line:lines) {
+            const auto a=rotated(line.a),b=rotated(line.b);
+            for(int k=0;k<pieces;++k) {
+                const float t0=static_cast<float>(k)/pieces,t1=static_cast<float>(k+1)/pieces;
+                stroke({a.x+(b.x-a.x)*t0,a.y+(b.y-a.y)*t0},{a.x+(b.x-a.x)*t1,a.y+(b.y-a.y)*t1});
+            }
+        }
+        return;
+    }
+    Ring rim{disc.radius,disc.offset,0,disc.outline,1.f};emit_ring(base,rim,viewport);
+    // Transparent strokes: traced diagonal star/wide cross and central square.
+    for(auto const& line:lines) {
+        auto point=[&](targetsc::GlyphPoint p) {
+            return Position{center.east+disc.radius*(p.x*cr-p.y*sr),
+                center.north+disc.radius*(p.x*sr+p.y*cr),center.height};
+        };
+        DrawVertex a{},b{};
+        if(!project(point(line.a),viewport,a,disc.outline)||!project(point(line.b),viewport,b,disc.outline))continue;
+        const float dx=b.x-a.x,dy=b.y-a.y,length=std::hypot(dx,dy);
+        if(length<.0001f)continue;
+        const float nx=-dy*.5f/length,ny=dx*.5f/length;
+        auto c=a,d=b;a.x-=nx;a.y-=ny;b.x-=nx;b.y-=ny;
+        c.x+=nx;c.y+=ny;d.x+=nx;d.y+=ny;triangle(a,c,b);triangle(b,c,d);
+    }
+}
+// 0.11.0: one 1-pixel line between two 3D glyph points (glyph units, z up
+// from the glyph plane), optionally clipped to z >= 0.
+void glyph3_line(Position const& center,Glyph3 const& g,float cr,float sr,targetsc::Point3 a,targetsc::Point3 b,
+    D3DVIEWPORT8 const& viewport) {
+    if(g.clip&&!targetsc::glyph3_clip(a,b))return;
+    auto world=[&](targetsc::Point3 p) {
+        return Position{center.east+g.radius*(p.x*cr-p.y*sr),center.north+g.radius*(p.x*sr+p.y*cr),
+            center.height-g.radius*p.z};
+    };
+    DrawVertex va{},vb{};
+    if(!project(world(a),viewport,va,g.color)||!project(world(b),viewport,vb,g.color))return;
+    const float dx=vb.x-va.x,dy=vb.y-va.y,length=std::hypot(dx,dy);
+    if(length<.0001f)return;
+    const float nx=-dy*.5f/length,ny=dx*.5f/length;
+    auto c=va,d=vb;va.x-=nx;va.y-=ny;vb.x-=nx;vb.y-=ny;
+    c.x+=nx;c.y+=ny;d.x+=nx;d.y+=ny;triangle(va,c,vb);triangle(vb,c,d);
+}
+void emit_glyph3(Position const& base,Glyph3 const& g,D3DVIEWPORT8 const& viewport) {
+    if(!(g.color>>24)||g.radius<.01f)return;
+    const Position center{base.east,base.north,base.height-g.offset};
+    const float cr=std::cos(g.rotation),sr=std::sin(g.rotation);
+    static const auto lines=targetsc::property_glyph();
+    static float max_length=0,max_distance=0;
+    if(max_length<=0)for(auto const& l:lines) {
+        const float dx=l.b.x-l.a.x,dy=l.b.y-l.a.y,mx=(l.a.x+l.b.x)*.5f,my=(l.a.y+l.b.y)*.5f;
+        max_length=std::max(max_length,std::sqrt(dx*dx+dy*dy));
+        max_distance=std::max(max_distance,std::sqrt(mx*mx+my*my));
+    }
+    max_distance=std::max(max_distance,targetsc::kGlyph3KeyDistance); // 0.13.0: same stagger keys as 0.12
+    for(auto const& l:lines) {
+        targetsc::Point3 a{},b{};
+        targetsc::glyph3_segment(l,g.params,max_length,max_distance,a,b);
+        glyph3_line(center,g,cr,sr,a,b,viewport);
+    }
+    if(g.circle)for(int i=0;i<ring_slices_;++i) {
+        const int n=(i+1)%ring_slices_;
+        glyph3_line(center,g,cr,sr,targetsc::glyph3_tilt({ring_cos_[i],ring_sin_[i],0.f},g.params.tilt),
+            targetsc::glyph3_tilt({ring_cos_[n],ring_sin_[n],0.f},g.params.tilt),viewport);
+    }
+}
+// 0.12.0: one straight line in target-relative world units (z up).
+void emit_line(Position const& base,Line const& l,D3DVIEWPORT8 const& viewport) {
+    if(!(l.color>>24))return;
+    DrawVertex a{},b{};
+    if(!project(Position{base.east+l.x1,base.north+l.y1,base.height-l.z1},viewport,a,l.color)||
+       !project(Position{base.east+l.x2,base.north+l.y2,base.height-l.z2},viewport,b,l.color))return;
+    const float dx=b.x-a.x,dy=b.y-a.y,length=std::hypot(dx,dy);
+    if(length<.0001f)return;
+    const float half=std::max(.5f,l.pixels*.5f);
+    const float nx=-dy*half/length,ny=dx*half/length;
+    auto c=a,d=b;a.x-=nx;a.y-=ny;b.x-=nx;b.y-=ny;
+    c.x+=nx;c.y+=ny;d.x+=nx;d.y+=ny;triangle(a,c,b);triangle(b,c,d);
+}
+void draw_all_rings() {
+    Frame f{};
+    AcquireSRWLockShared(&g_frame_lock); f=g_frame; ReleaseSRWLockShared(&g_frame_lock);
+    // A stopped/erroring Lua state cannot leave a permanent frozen resonance.
+    if ((!f.count && !f.disc_count && !f.glyph_count && !f.line_count) || GetTickCount()-f.tick>250 || !d3d_device_) return;
+    Position base{};
+    if (!live_position(f.index,base,nullptr)) {InterlockedIncrement(&g_tracking_failures); return;}
+    auto* dev=static_cast<IDirect3DDevice8*>(d3d_device_);
+    D3DMATRIX view{},projection{}; D3DVIEWPORT8 viewport{};
+    if (FAILED(dev->GetTransform(D3DTS_VIEW,&view)) || FAILED(dev->GetTransform(D3DTS_PROJECTION,&projection))
+        || FAILED(dev->GetViewport(&viewport)) || !viewport.Width || !viewport.Height) return;
+    for(int r=0;r<4;++r) for(int c=0;c<4;++c) {
+        g_vp.m[r][c]=0; for(int k=0;k<4;++k) g_vp.m[r][c]+=view.m[r][k]*projection.m[k][c];
+    }
+    {   // 0.15.1: direction from the entity toward the camera (camera-relative arcs).
+        float vm[4][4];for(int r=0;r<4;++r)for(int c=0;c<4;++c)vm[r][c]=view.m[r][c];
+        const auto cam=targetsc::camera_position(vm);
+        const float a=targetsc::toward_camera(base.east,base.north,cam);
+        g_camera_angle=std::isfinite(a)?a:0.f;
+    }
+    // D3D8 state blocks include shaders, textures, stage states AND stream 0
+    // (DrawPrimitiveUP clears stream 0). A fresh token avoids reset-lifetime
+    // resource issues. Never draw if capturing the complete state fails.
+    DWORD token=0;
+    if(FAILED(dev->CreateStateBlock(D3DSBT_ALL,&token))) {InterlockedIncrement(&g_state_failures);return;}
+    bool ok=true;
+    auto rs=[&](D3DRENDERSTATETYPE k,DWORD v){if(FAILED(dev->SetRenderState(k,v)))ok=false;};
+    auto ts=[&](DWORD stage,D3DTEXTURESTAGESTATETYPE k,DWORD v){if(FAILED(dev->SetTextureStageState(stage,k,v)))ok=false;};
+    if(FAILED(dev->SetTexture(0,nullptr))||FAILED(dev->SetPixelShader(0))
+        ||FAILED(dev->SetVertexShader(D3DFVF_XYZRHW|D3DFVF_DIFFUSE)))ok=false;
+    rs(D3DRS_ALPHABLENDENABLE,TRUE);rs(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);
+    // Standard alpha permits translucent black-purple strands to be visible.
+    rs(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);rs(D3DRS_BLENDOP,D3DBLENDOP_ADD);
+    rs(D3DRS_ZENABLE,TRUE);rs(D3DRS_ZFUNC,D3DCMP_LESSEQUAL);rs(D3DRS_ZWRITEENABLE,FALSE);
+    rs(D3DRS_LIGHTING,FALSE);rs(D3DRS_CULLMODE,D3DCULL_NONE);rs(D3DRS_FOGENABLE,FALSE);
+    rs(D3DRS_ALPHATESTENABLE,FALSE);rs(D3DRS_STENCILENABLE,FALSE);
+    rs(D3DRS_FILLMODE,D3DFILL_SOLID);rs(D3DRS_CLIPPLANEENABLE,0);
+    rs(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_RED|D3DCOLORWRITEENABLE_GREEN|D3DCOLORWRITEENABLE_BLUE|D3DCOLORWRITEENABLE_ALPHA);
+    ts(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);ts(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
+    ts(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);ts(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);
+    ts(1,D3DTSS_COLOROP,D3DTOP_DISABLE);ts(1,D3DTSS_ALPHAOP,D3DTOP_DISABLE);
+    if(ok) {
+        g_vertex_count=0;
+        // Draw larger/lower glyphs first (Lua orders them), then ring glows and
+        // cores. One bounded native submission per visible frame.
+        auto shifted=[&](float dx,float dy){return Position{base.east+dx,base.north+dy,base.height};};
+        for(int i=0;i<f.disc_count;++i)emit_disc(shifted(f.discs[i].dx,f.discs[i].dy),f.discs[i],viewport);
+        for(int i=0;i<f.glyph_count;++i)emit_glyph3(shifted(f.glyphs[i].dx,f.glyphs[i].dy),f.glyphs[i],viewport);
+        for(int i=0;i<f.count;++i)emit_ring(shifted(f.rings[i].dx,f.rings[i].dy),f.rings[i],viewport);
+        for(int i=0;i<f.line_count;++i)emit_line(base,f.lines[i],viewport);
+        if(g_vertex_count && SUCCEEDED(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST,g_vertex_count/3,g_vertices,sizeof(DrawVertex))))
+            InterlockedIncrement(&g_draws);
+    } else InterlockedIncrement(&g_state_failures);
+    if(FAILED(dev->ApplyStateBlock(token)))InterlockedIncrement(&g_state_failures);
+    dev->DeleteStateBlock(token);
+}
+void SCENEHOOK_ALIGN_STACK __cdecl scene_draw(void*,void* renderer,void*) {
+    InterlockedIncrement(&g_frames);
+    g_renderer=reinterpret_cast<std::uintptr_t>(renderer);
+    acquire_device(g_renderer);draw_all_rings();
+}
+bool install_hook() {
+    if (!g_bus) {
+        g_bus = scenehook_attach();
+    }
+
+    if (!g_bus) {
+        std::snprintf(g_status, sizeof(g_status),
+            "scene hook unavailable (another addon may be built against a different ABI)");
+        return false;
+    }
+
+    if (!scenehook_ensure_hook(g_bus)) {
+        std::snprintf(g_status, sizeof(g_status), "%s", g_bus->status);
+        return false;
+    }
+
+    if (g_bus_slot < 0) {
+        g_bus_slot = scenehook_register(g_bus, &scene_draw, nullptr);
+        if (g_bus_slot < 0) {
+            std::snprintf(g_status, sizeof(g_status), "scene hook is full");
+            return false;
+        }
+    }
+
+    scenehook_set_enabled(g_bus, g_bus_slot, true);
+    std::snprintf(g_status, sizeof(g_status), "running");
+    return true;
+}
+
+
+void clear_frame() {
+    AcquireSRWLockExclusive(&g_frame_lock);Frame empty{};g_frame=empty;ReleaseSRWLockExclusive(&g_frame_lock);
+    Frame empty_pending{};g_pending=empty_pending;
+}
+int __cdecl lua_start(lua_State* L) {install_hook();g_lua.pushstring(L,g_status);return 1;}
+int __cdecl lua_stop(lua_State* L) {
+    clear_frame();scenehook_unregister(g_bus,g_bus_slot,true);g_bus_slot=-1;
+    d3d_device_=nullptr;g_device=0;g_last_renderer=0;g_device_attempts=0;g_device_frames=0;
+    std::snprintf(g_status,sizeof(g_status),"stopped");g_lua.pushstring(L,g_status);return 1;
+}
+int __cdecl lua_clear(lua_State*) {clear_frame();return 0;}
+int __cdecl lua_begin(lua_State* L) {
+    Frame empty_pending{};g_pending=empty_pending;
+    const double index=g_lua.tonumber(L,1),id=g_lua.tonumber(L,2);
+    if(std::isfinite(index)&&index>0&&index<kMaxIndex&&std::isfinite(id)&&id>0&&id<=4294967295.0) {
+        g_pending.index=static_cast<DWORD>(index);g_pending.id=static_cast<DWORD>(id);
+    }
+    return 0;
+}
+int __cdecl lua_ring(lua_State* L) {
+    if(g_pending.count>=kMaxRings || !g_pending.index || g_lua.gettop(L)<4)return 0;
+    const double r=g_lua.tonumber(L,1),h=g_lua.tonumber(L,2),w=g_lua.tonumber(L,3),c=g_lua.tonumber(L,4);
+    if(!std::isfinite(r)||!std::isfinite(h)||!std::isfinite(w)||!std::isfinite(c)
+        ||r<.01||r>100||std::fabs(h)>1000||w<0||w>5||c<0||c>4294967295.0)return 0;
+    const double pixels=g_lua.gettop(L)>=5?g_lua.tonumber(L,5):0;
+    if(!std::isfinite(pixels)||pixels<0||pixels>64)return 0;
+    const int argc=g_lua.gettop(L);
+    const double sectors=argc>=6?g_lua.tonumber(L,6):1;
+    const double c2=argc>=7?g_lua.tonumber(L,7):c,c3=argc>=8?g_lua.tonumber(L,8):c,c4=argc>=9?g_lua.tonumber(L,9):c;
+    const double angle=argc>=10?g_lua.tonumber(L,10):0;
+    const double gap=argc>=11?g_lua.tonumber(L,11):0;
+    const double blend=argc>=12?g_lua.tonumber(L,12):0;
+    // 0.8.0: optional open-arc fade, length, curve and bright-end direction.
+    const double fade=argc>=13?g_lua.tonumber(L,13):0,length=argc>=14?g_lua.tonumber(L,14):1;
+    const double curve=argc>=15?g_lua.tonumber(L,15):1,direction=argc>=16?g_lua.tonumber(L,16):1;
+    if(!std::isfinite(fade)||fade<0||fade>1||!std::isfinite(length)||length<.1||length>1
+        ||!std::isfinite(curve)||curve<.5||curve>3||(direction!=1&&direction!=-1))return 0;
+    if(!std::isfinite(gap)||gap<0||gap>60)return 0;
+    if(!std::isfinite(blend)||(blend!=0&&blend!=1))return 0;
+    if(!std::isfinite(sectors)||sectors<1||sectors>4||sectors!=std::floor(sectors)||!std::isfinite(angle)||std::fabs(angle)>1000000)return 0;
+    for(double color:{c2,c3,c4})if(!std::isfinite(color)||color<0||color>4294967295.0)return 0;
+    g_pending.rings[g_pending.count++]={static_cast<float>(r),static_cast<float>(h),static_cast<float>(w),static_cast<DWORD>(c),static_cast<float>(pixels),
+        static_cast<int>(sectors),static_cast<DWORD>(c2),static_cast<DWORD>(c3),static_cast<DWORD>(c4),static_cast<float>(angle),static_cast<float>(gap),static_cast<int>(blend),
+        static_cast<float>(fade),static_cast<float>(length),static_cast<float>(curve),static_cast<int>(direction)};
+    g_pending.rings[g_pending.count-1].dx=g_pending.shift_e;g_pending.rings[g_pending.count-1].dy=g_pending.shift_n;
+    return 0;
+}
+// 0.9.0: native.arc(radius,offset,width,lead,tail,pixels,rotation,start_deg,span_deg,
+//                   fade,length,curve,direction)
+// 0.15.1: optional 14th argument camera (0/1): start_deg is measured from the
+// direction toward the camera, so an arc can keep facing the viewer.
+int __cdecl lua_arc(lua_State* L) {
+    if(g_pending.count>=kMaxRings || !g_pending.index || g_lua.gettop(L)<13)return 0;
+    double v[13];for(int i=0;i<13;++i){v[i]=g_lua.tonumber(L,i+1);if(!std::isfinite(v[i]))return 0;}
+    const double r=v[0],h=v[1],w=v[2],lead=v[3],tail=v[4],px=v[5],rot=v[6],start=v[7],span=v[8];
+    const double fade=v[9],length=v[10],curve=v[11],direction=v[12];
+    if(r<.01||r>100||std::fabs(h)>1000||w<0||w>5||lead<0||lead>4294967295.0||tail<0||tail>4294967295.0
+        ||px<0||px>64||std::fabs(rot)>1000000||std::fabs(start)>3600||span<=0||span>360
+        ||fade<0||fade>1||length<.1||length>1||curve<.5||curve>3||(direction!=1&&direction!=-1))return 0;
+    constexpr double rad=3.14159265358979/180.0;
+    Ring ring{};ring.radius=static_cast<float>(r);ring.offset=static_cast<float>(h);ring.width=static_cast<float>(w);
+    ring.color=static_cast<DWORD>(lead);ring.pixels=static_cast<float>(px);ring.rotation=static_cast<float>(rot);
+    ring.fade=static_cast<float>(fade);ring.fade_length=static_cast<float>(length);ring.fade_curve=static_cast<float>(curve);
+    ring.fade_direction=static_cast<int>(direction);ring.arc=1;ring.arc_start=static_cast<float>(start*rad);
+    ring.arc_span=static_cast<float>(span*rad);ring.tail=static_cast<DWORD>(tail);
+    if(g_lua.gettop(L)>=14) {
+        const double camera=g_lua.tonumber(L,14);
+        if(camera!=0&&camera!=1)return 0;
+        ring.camera=static_cast<int>(camera);
+    }
+    ring.dx=g_pending.shift_e;ring.dy=g_pending.shift_n;
+    g_pending.rings[g_pending.count++]=ring;
+    return 0;
+}
+int __cdecl lua_disc(lua_State* L) {
+    if(!g_pending.index||g_pending.disc_count>=kMaxDiscs||g_lua.gettop(L)<5)return 0;
+    const double r=g_lua.tonumber(L,1),h=g_lua.tonumber(L,2),a=g_lua.tonumber(L,3),c=g_lua.tonumber(L,4),g=g_lua.tonumber(L,5);
+    if(!std::isfinite(r)||!std::isfinite(h)||!std::isfinite(a)||!std::isfinite(c)||!std::isfinite(g)
+        ||r<.01||r>100||std::fabs(h)>1000||std::fabs(a)>1000000||c<0||c>4294967295.0)return 0;
+    const int argc=g_lua.gettop(L);
+    const double outline=argc>=6?g_lua.tonumber(L,6):0,sectors=argc>=7?g_lua.tonumber(L,7):1;
+    const double c2=argc>=8?g_lua.tonumber(L,8):c,c3=argc>=9?g_lua.tonumber(L,9):c,c4=argc>=10?g_lua.tonumber(L,10):c;
+    const double blend=argc>=11?g_lua.tonumber(L,11):0;
+    // 0.7.0: optional center (inner) and rim (outer) fill-alpha multipliers.
+    const double inner=argc>=12?g_lua.tonumber(L,12):1,outer=argc>=13?g_lua.tonumber(L,13):1;
+    // 0.9.0: optional hub (center) color, replacing the averaged center.
+    const double hub=argc>=14?g_lua.tonumber(L,14):-1;
+    if(!std::isfinite(hub)||hub>4294967295.0||(hub<0&&hub!=-1))return 0;
+    // 0.10.0: optional middle radial stop: alpha multiplier (0..1, -1 = none)
+    // at a fraction of the radius (.05..95).
+    const double mid=argc>=15?g_lua.tonumber(L,15):-1,mid_pos=argc>=16?g_lua.tonumber(L,16):.5;
+    if(!std::isfinite(mid)||(mid!=-1&&(mid<0||mid>1))||!std::isfinite(mid_pos)||mid_pos<.05||mid_pos>.95)return 0;
+    if(g<0||g>2||g!=std::floor(g)||!std::isfinite(sectors)||sectors<1||sectors>4||sectors!=std::floor(sectors))return 0;
+    if(!std::isfinite(blend)||(blend!=0&&blend!=1))return 0;
+    if(!std::isfinite(inner)||!std::isfinite(outer)||inner<0||inner>1||outer<0||outer>1)return 0;
+    for(double color:{outline,c2,c3,c4})if(!std::isfinite(color)||color<0||color>4294967295.0)return 0;
+    g_pending.discs[g_pending.disc_count++]={static_cast<float>(r),static_cast<float>(h),static_cast<float>(a),static_cast<DWORD>(c),static_cast<int>(g),
+        static_cast<DWORD>(outline),static_cast<int>(sectors),static_cast<DWORD>(c2),static_cast<DWORD>(c3),static_cast<DWORD>(c4),static_cast<int>(blend),
+        static_cast<float>(inner),static_cast<float>(outer),hub>=0?1:0,static_cast<DWORD>(hub>=0?hub:0),
+        mid>=0?1:0,static_cast<float>(mid>=0?mid:1),static_cast<float>(mid_pos)};
+    g_pending.discs[g_pending.disc_count-1].dx=g_pending.shift_e;g_pending.discs[g_pending.disc_count-1].dy=g_pending.shift_n;
+    // 0.13.0: optional arg 17 = clip angle (radians, east=0, north=pi/2):
+    // only the glyph and rim on that side of the disc center are drawn.
+    if(argc>=17) {
+        const double clip=g_lua.tonumber(L,17);
+        if(std::isfinite(clip)&&std::fabs(clip)<=1000000) {
+            Disc& d=g_pending.discs[g_pending.disc_count-1];
+            d.has_clip=1;d.clip_x=static_cast<float>(std::cos(clip));d.clip_y=static_cast<float>(std::sin(clip));
+        }
+    }
+    // 0.14.0: optional arg 18 = sliced center (0/1). Pass arg 17 outside
+    // +-1e6 (e.g. 1e9) for no clip.
+    if(argc>=18) {
+        const double sliced=g_lua.tonumber(L,18);
+        if(sliced==1)g_pending.discs[g_pending.disc_count-1].sliced=1;
+    }
+    // 0.15.0: optional args 19-23 = glyph shimmer angle (radians, world;
+    // outside +-1e6 = none), half-width (radians, 0..pi), far-side alpha
+    // multiplier (0..1), gain (0..1), count (1..4). At most kMaxShimmerDiscs
+    // discs per frame shimmer; later ones draw plain.
+    if(argc>=23) {
+        const double angle=g_lua.tonumber(L,19),width=g_lua.tonumber(L,20),rest=g_lua.tonumber(L,21),
+            gain=g_lua.tonumber(L,22),count=g_lua.tonumber(L,23);
+        if(std::isfinite(angle)&&std::fabs(angle)<=1000000&&std::isfinite(width)&&width>=0&&width<=3.15&&
+           std::isfinite(rest)&&rest>=0&&rest<=1&&std::isfinite(gain)&&gain>=0&&gain<=1&&
+           std::isfinite(count)&&count>=1&&count<=4&&g_pending.shimmer_count<kMaxShimmerDiscs) {
+            Disc& d=g_pending.discs[g_pending.disc_count-1];
+            d.has_shimmer=1;d.shimmer_angle=static_cast<float>(angle);d.shimmer_width=static_cast<float>(width);
+            d.shimmer_far=static_cast<float>(rest);d.shimmer_gain=static_cast<float>(gain);d.shimmer_count=static_cast<int>(count);
+            ++g_pending.shimmer_count;
+        }
+    }
+    return 0;
+}
+// 0.11.0 native.glyph(radius,height,rotation,color,tilt,stand,lift,sink,pull,
+// stagger,order,clip,circle): a 3D property glyph for the Umbra endings.
+int __cdecl lua_glyph(lua_State* L) {
+    if(!g_pending.index||g_pending.glyph_count>=kMaxGlyphs3||g_lua.gettop(L)<13)return 0;
+    double v[13];for(int i=0;i<13;++i){v[i]=g_lua.tonumber(L,i+1);if(!std::isfinite(v[i]))return 0;}
+    if(v[0]<.01||v[0]>100||std::fabs(v[1])>1000||std::fabs(v[2])>1000000||v[3]<0||v[3]>4294967295.0
+        ||std::fabs(v[4])>7||v[5]<0||v[5]>1||v[6]<0||v[6]>4||v[7]<0||v[7]>1||v[8]<0||v[8]>1||v[9]<0||v[9]>1
+        ||(v[10]!=0&&v[10]!=1&&v[10]!=2)||(v[11]!=0&&v[11]!=1)||(v[12]!=0&&v[12]!=1))return 0;
+    Glyph3 g{};g.radius=static_cast<float>(v[0]);g.offset=static_cast<float>(v[1]);g.rotation=static_cast<float>(v[2]);
+    g.color=static_cast<DWORD>(v[3]);
+    g.params.tilt=static_cast<float>(v[4]);g.params.stand=static_cast<float>(v[5]);g.params.lift=static_cast<float>(v[6]);
+    g.params.sink=static_cast<float>(v[7]);g.params.pull=static_cast<float>(v[8]);g.params.stagger=static_cast<float>(v[9]);
+    g.params.order=static_cast<int>(v[10]);g.clip=static_cast<int>(v[11]);g.circle=static_cast<int>(v[12]);
+    g.dx=g_pending.shift_e;g.dy=g_pending.shift_n;
+    g_pending.glyphs[g_pending.glyph_count++]=g;
+    return 0;
+}
+// 0.12.0 native.shift(east,north): sideways offset (world units) stamped on
+// every ring/arc/disc/glyph added after it this frame; begin resets it.
+int __cdecl lua_shift(lua_State* L) {
+    if(g_lua.gettop(L)<2)return 0;
+    const double e=g_lua.tonumber(L,1),n=g_lua.tonumber(L,2);
+    if(!std::isfinite(e)||!std::isfinite(n)||std::fabs(e)>100||std::fabs(n)>100)return 0;
+    g_pending.shift_e=static_cast<float>(e);g_pending.shift_n=static_cast<float>(n);
+    return 0;
+}
+// 0.12.0 native.line(x1,y1,z1,x2,y2,z2,color,pixels): target-relative, z up.
+int __cdecl lua_line(lua_State* L) {
+    if(!g_pending.index||g_pending.line_count>=kMaxLines||g_lua.gettop(L)<7)return 0;
+    double v[8];for(int i=0;i<8;++i){v[i]=i<g_lua.gettop(L)?g_lua.tonumber(L,i+1):1;if(!std::isfinite(v[i]))return 0;}
+    for(int i=0;i<6;++i)if(std::fabs(v[i])>100)return 0;
+    if(v[6]<0||v[6]>4294967295.0||v[7]<0||v[7]>64)return 0;
+    Line l{};l.x1=static_cast<float>(v[0]);l.y1=static_cast<float>(v[1]);l.z1=static_cast<float>(v[2]);
+    l.x2=static_cast<float>(v[3]);l.y2=static_cast<float>(v[4]);l.z2=static_cast<float>(v[5]);
+    l.color=static_cast<DWORD>(v[6]);l.pixels=static_cast<float>(v[7]);
+    g_pending.lines[g_pending.line_count++]=l;
+    return 0;
+}
+int __cdecl lua_commit(lua_State*) {
+    g_pending.tick=GetTickCount();
+    AcquireSRWLockExclusive(&g_frame_lock);g_frame=g_pending;ReleaseSRWLockExclusive(&g_frame_lock);return 0;
+}
+int __cdecl lua_version(lua_State* L){g_lua.pushstring(L,"0.15.2");return 1;}
+int __cdecl lua_status(lua_State* L) {
+    char bus[224]{},report[768]{};scenehook_describe(g_bus,g_bus_slot,bus,sizeof(bus));
+    Frame f{};AcquireSRWLockShared(&g_frame_lock);f=g_frame;ReleaseSRWLockShared(&g_frame_lock);
+    std::snprintf(report,sizeof(report),"TargetSC 0.15.2 %s; glyph=traced; frames=%ld draws=%ld device=%s entity_array=%s tracking_failures=%ld state_failures=%ld rings=%d discs=%d entity=%lu/index=%lu | %s",
+        g_status,g_frames,g_draws,d3d_device_?"ready":"pending",g_entity_array?"ready":"pending",
+        g_tracking_failures,g_state_failures,f.count,f.disc_count,static_cast<unsigned long>(f.id),static_cast<unsigned long>(f.index),bus);
+    g_lua.pushstring(L,report);return 1;
+}
+bool bind_lua() {
+    if (g_lua.ready()) {
+        return true;
+    }
+
+    static char const* const hosts[] = {"LuaCore.dll", "lua51.dll", "lua5.1.dll"};
+    for (char const* host : hosts) {
+        HMODULE module = GetModuleHandleA(host);
+        if (!module) {
+            continue;
+        }
+
+        g_lua.createtable = reinterpret_cast<fn_createtable>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_createtable")));
+        g_lua.pushcclosure = reinterpret_cast<fn_pushcclosure>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_pushcclosure")));
+        g_lua.setfield = reinterpret_cast<fn_setfield>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_setfield")));
+        g_lua.pushvalue = reinterpret_cast<fn_pushvalue>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_pushvalue")));
+        g_lua.pushstring = reinterpret_cast<fn_pushstring>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_pushstring")));
+        g_lua.gettop = reinterpret_cast<fn_gettop>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_gettop")));
+        g_lua.tonumber = reinterpret_cast<fn_tonumber>(
+            reinterpret_cast<void*>(GetProcAddress(module, "lua_tonumber")));
+
+        if (g_lua.ready()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+} // namespace
+extern "C" __declspec(dllexport) int __cdecl luaopen__TargetSC(lua_State* L) {
+    if(!bind_lua())return 0;
+    build_tables();clear_frame();g_lua.createtable(L,0,13);
+    struct Entry {char const* name;lua_CFunction fn;};
+    const Entry entries[]={{"start",lua_start},{"stop",lua_stop},{"clear",lua_clear},{"begin",lua_begin},
+        {"ring",lua_ring},{"arc",lua_arc},{"disc",lua_disc},{"glyph",lua_glyph},{"shift",lua_shift},{"line",lua_line},{"commit",lua_commit},{"status",lua_status},{"version",lua_version}};
+    for(auto const& e:entries){g_lua.pushcclosure(L,e.fn,0);g_lua.setfield(L,-2,e.name);}
+    return 1;
+}
+BOOL WINAPI DllMain(HINSTANCE module,DWORD reason,LPVOID) {
+    if(reason==DLL_PROCESS_ATTACH)DisableThreadLibraryCalls(module);
+    if(reason==DLL_PROCESS_DETACH){
+        // Must run even after a Lua failure. No waiting under loader lock.
+        scenehook_unregister(g_bus,g_bus_slot,false);g_bus_slot=-1;
+    }
+    return TRUE;
+}

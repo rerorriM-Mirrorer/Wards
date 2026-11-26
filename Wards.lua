@@ -5,7 +5,7 @@
 -- Author: A.
 _addon.name='Wards'
 _addon.author='A'
-_addon.version='0.3.0-test3'
+_addon.version='0.3.1-test4'
 _addon.commands={'wards'}
 
 require('chat')
@@ -53,9 +53,11 @@ do
                 if type(result[name])~='function' then renderer_error='DLL is missing '..name end
             end
             -- Test2 needs 0.15.1: arcs measured from the camera (HP ring).
+            -- Test4 needs 0.15.2: SceneHook owner thunks, so //lua unload or
+            -- reload of Wards can no longer crash the client mid-frame.
             local ok_v,version=pcall(result.version)
-            if not renderer_error and (not ok_v or version~='0.15.1') then
-                renderer_error='libs/_Wards.dll is '..tostring(version)..', Wards needs 0.15.1 (close the game and replace it)'
+            if not renderer_error and (not ok_v or version~='0.15.2') then
+                renderer_error='libs/_Wards.dll is '..tostring(version)..', Wards needs 0.15.2 (close the game and replace it)'
             end
             if not renderer_error then native=result end
         else renderer_error=tostring(result) end
