@@ -114,14 +114,14 @@ function M.shimmer(state, enabled, now, radius, height, settings, color)
     local ground = tonumber(settings.ground) or 0.3
     color = color or {65, 130, 255}
 
+    if state.pulse_at and now >= state.pulse_at + duration then
+        state.pulse_at = nil
+    end
+
     if not state.pulse_at and now >= state.next_at then
         state.cycle = state.cycle + 1
         state.pulse_at = now
         state.next_at = now + period
-    end
-
-    if state.pulse_at and now >= state.pulse_at + duration then
-        state.pulse_at = nil
     end
     if not state.pulse_at then return out end
 
