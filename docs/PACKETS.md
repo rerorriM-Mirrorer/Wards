@@ -4,7 +4,7 @@ This document records the deliberately narrow packet classifier used by the Prot
 
 ## Source packet
 
-Windower's packet definitions identify incoming packet \`0x028\` as the action packet. The \`Category\` enumeration defines:
+Windower's packet definitions identify incoming packet `0x028` as the action packet. The `Category` enumeration defines:
 
 | Value | Meaning | POC handling |
 | ---: | --- | --- |
@@ -17,23 +17,23 @@ Windower's packet definitions identify incoming packet \`0x028\` as the action p
 | 11 | NPC TP finish | Excluded pending separate physical/magical classification |
 | 13 | Avatar TP finish | Excluded |
 
-The packet contains a target count, target entity IDs, per-target action counts, and per-action \`Param\` and \`Message\` fields. For a local recipient, Wards matches \`Target N ID\` against \`get_mob_by_target('me').id\`. It sums \`Target N Action M Param\` only when the corresponding \`Message\` equals \`1\` and the damage parameter is positive. This covers multi-hit melee/ranged packet completions without responding to actions on other targets or to zero-damage/miss messages.
+The packet contains a target count, target entity IDs, per-target action counts, and per-action `Param` and `Message` fields. For a local recipient, Wards matches `Target N ID` against `get_mob_by_target('me').id`. It sums `Target N Action M Param` only when the corresponding `Message` equals `1` and the damage parameter is positive. This covers multi-hit melee/ranged packet completions without responding to actions on other targets or to zero-damage/miss messages.
 
-Windower's \`actions.lua\` documentation includes an example that treats action \`message == 1\` as a hit and \`action.param\` as its damage amount. The POC uses the lower-level \`packets.parse('incoming', data)\` interface and the packet's named fields.
+Windower's `actions.lua` documentation includes an example that treats action `message == 1` as a hit and `action.param` as its damage amount. The POC uses the lower-level `packets.parse('incoming', modified or data)` interface and the packet's named fields. The event handler ignores packets whose `blocked` flag is true, so it does not animate for a packet another addon prevented from reaching the game.
 
 ## Intensity
 
 The VFX state machine accepts a normalized integer intensity independently of packet parsing:
 
-\`vfx.trigger_impact(state, intensity, now)\`
+`vfx.trigger_impact(state, intensity, now)`
 
 Values outside 1-9999 are rejected. The packet adapter currently maps total positive landed damage to:
 
-\`intensity = clamp(round(total_damage * 10), 1, 9999)\`
+`intensity = clamp(round(total_damage * 10), 1, 9999)`
 
 The renderer response uses a power curve:
 
-\`strength = (intensity / 9999) ^ 1.6\`
+`strength = (intensity / 9999) ^ 1.6`
 
 This is a tunable visual-severity mapping only. It is not a game-mechanics estimate of prevented damage.
 

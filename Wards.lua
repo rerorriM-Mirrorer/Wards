@@ -148,7 +148,9 @@ local function draw()
     last_protect_active=protect_active
     local protect_color=model.color('protect',settings.protect_color) or model.colors.protect.element
     local expiry_items=vfx.expiration(expiry_state,settings.protect_expiry_glints or test.expire,now,radius,height,settings,protect_color)
+    if test.expire and not expiry_state.started_at then test.expire=false end
     local impact_item=vfx.impact(impact_state,settings.protect_impact or test.impact,now,radius,height,settings)
+    if test.impact and not impact_state.started_at then test.impact=false end
     -- Pause, rather than reset, the idle cycle during the brief impact surface.
     local shimmer_enabled=settings.protect_shimmer and (test.shimmer or protect_active) and impact_item==nil
     local shimmer_items=impact_item and {} or vfx.shimmer(shimmer_state,shimmer_enabled,now,radius,height,settings,protect_color)
@@ -516,9 +518,9 @@ windower.register_event('addon command',function(command,...)
     help()
 end)
 windower.register_event('prerender',draw)
-local function incoming_action(id,data)
-    if id~=0x028 or not settings.enabled or not settings.protect_impact then return end
-    local ok,packet=pcall(packets.parse,'incoming',data)
+local function incoming_action(id,data,modified,is_injected,is_blocked)
+    if id~=0x028 or is_blocked or not settings.enabled or not settings.protect_impact then return end
+    local ok,packet=pcall(packets.parse,'incoming',modified or data)
     if not ok or type(packet)~='table' then return end
     local category=tonumber(packet.Category)
     -- Restrict the first classifier to completed melee and ranged actions.

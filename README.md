@@ -48,7 +48,7 @@ Copy the `Wards` folder into `Windower/addons/` (or download this repository and
 | `//wards defaults` | Restores every setting. |
 | `//wards restart` / `unload` | Reloads or unloads Wards. |
 
-## Protect idle shimmer (POC)
+## Protect VFX experiment (POC)
 
 This experiment is on `development/protect-vfx-poc`; it is not part of `main` and has not yet been visually tested in FFXI. While Protect is present, a narrow blue band occasionally travels up or down the character. Most passes use one band; every fourth pass may use a second band moving the other way. Each band is a very faint core with a softer halo. It uses the existing ring geometry and depth testing, not a permanent aura or a particle system. The Protect ring remains independently controlled by `//wards protect`.
 

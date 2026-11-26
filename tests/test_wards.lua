@@ -337,9 +337,11 @@ packet_data={
     ['Target 1 Action 1 Message']=1,['Target 1 Action 1 Param']=20,
     ['Target 1 Action 2 Message']=1,['Target 1 Action 2 Param']=30,
 }
-events['incoming chunk'](0x028,packet_data)
+local original_packet={Category=3,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Action Count']=1,
+    ['Target 1 Action 1 Message']=1,['Target 1 Action 1 Param']=500}
+events['incoming chunk'](0x028,original_packet,packet_data,false,false)
 frame()
-check(count('shield')==1,'melee packet matching the protected recipient triggers a shield')
+check(count('shield')==1,'modified melee packet matching the protected recipient triggers a shield')
 
 events['addon command']('test','off')
 packet_data={Category=3,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Action Count']=1,
@@ -354,6 +356,10 @@ packet_data={Category=1,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Acti
     ['Target 1 Action 1 Message']=85,['Target 1 Action 1 Param']=0}
 events['incoming chunk'](0x028,packet_data) frame()
 check(count('shield')==0,'misses and non-damage action messages are excluded')
+packet_data={Category=1,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Action Count']=1,
+    ['Target 1 Action 1 Message']=1,['Target 1 Action 1 Param']=500}
+events['incoming chunk'](0x028,packet_data,packet_data,false,true) frame()
+check(count('shield')==0,'packets blocked by another addon are ignored')
 
 -- Losing Protect emits the short glint sequence once.
 player.buffs={} for _=1,4 do frame() end

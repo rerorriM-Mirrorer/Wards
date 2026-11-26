@@ -37,7 +37,7 @@ jobs:
           if-no-files-found: error
 
   publish-poc-renderer:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/development/protect-vfx-poc'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/development/protect-vfx-poc' && contains(github.event.head_commit.message, '[publish-renderer]')
     needs: wards
     runs-on: ubuntu-latest
     permissions:
