@@ -10,6 +10,8 @@ local function near(a,b,e) return math.abs(a-b)<=(e or 1e-6) end
 
 local model=require('wards_model')
 local vfx=require('wards_vfx')
+local packet_data=nil
+package.loaded.packets={parse=function(direction,data) packet_data=data return data end}
 
 -- Model: buff IDs and detection
 check(model.BUFF.protect==40 and model.BUFF.shell==41,'buff ids 40/41')
@@ -133,6 +135,28 @@ check(band_count(shimmer_double)==2 and #shimmer_double==4,
     'occasional double pass stays at two bands: '..band_count(shimmer_double)..' bands, '..#shimmer_double..' rings (cycle '..shimmer_state.cycle..')')
 check(#vfx.shimmer(shimmer_state,false,16.4,1,2,shimmer_opts,shimmer_color)==0 and not shimmer_state.active,'shimmer resets when disabled')
 
+-- Protect expiration glints and impact intensity --------------------------------
+local expiry=vfx.new_expiration_state()
+vfx.trigger_expiration(expiry,20)
+local glints=vfx.expiration(expiry,true,20.12,1,2,{ground=.3},{65,130,255})
+check(#glints==4 and glints[1].kind=='hex','Protect expiration emits four tiny hex glints')
+check(glints[1].radius<.06 and glints[1].pixels==1.25,'expiration glints stay tiny')
+check(#vfx.expiration(expiry,true,20.6,1,2,{ground=.3},{65,130,255})==0,'expiration glints fade and reset')
+check(vfx.damage_to_intensity(100)==1000 and vfx.damage_to_intensity(2000)==9999,'damage proxy maps and caps at 9999')
+check(vfx.damage_to_intensity(0)==nil,'zero damage has no impact intensity')
+check(vfx.intensity_response(1)<.001 and vfx.intensity_response(9999)==1,'impact intensity uses a nonlinear 1-9999 curve')
+local impact=vfx.new_impact_state()
+check(not vfx.trigger_impact(impact,0,30),'impact rejects intensity below 1')
+check(not vfx.trigger_impact(impact,10000,30),'impact rejects intensity above 9999')
+check(vfx.trigger_impact(impact,5000,30),'impact accepts normalized preview intensity')
+local shield=vfx.impact(impact,true,30.03,1.2,2.4,{ground=.3})
+check(shield and shield.kind=='shield' and shield.wave>0 and shield.wave<=1.12,'impact produces a moving shield/ripple')
+local weak=vfx.new_impact_state()
+vfx.trigger_impact(weak,1,30)
+local weak_shield=vfx.impact(weak,true,30.03,1.2,2.4,{ground=.3})
+check(weak_shield.edge<shield.edge and weak_shield.outline<shield.outline,'higher intensity produces stronger visible shield')
+check(vfx.impact(impact,true,30.6,1.2,2.4,{ground=.3})==nil,'impact fades and resets')
+
 -- Addon smoke test with stubbed Windower -----------------------------------
 local chat,calls,events,sent={},{},{},{}
 local clock=0
@@ -144,10 +168,11 @@ local saved
 local saved_file={}
 package.loaded.config={load=function(d) local s={} for k,v in pairs(d) do s[k]=v end for k,v in pairs(saved_file) do s[k]=v end return s end,
     save=function(s) saved=s end}
-local fake_version='0.15.2'
+local fake_version='0.16.0'
 local fake={version=function() return fake_version end,start=function() return 'running' end,stop=function() return 'stopped' end,
     clear=function() calls[#calls+1]={'clear'} end,begin=function(i,id) calls[#calls+1]={'begin',i,id} end,
-    ring=function(...) calls[#calls+1]={'ring',...} end,arc=function(...) calls[#calls+1]={'arc',...} end,commit=function() calls[#calls+1]={'commit'} end,
+    ring=function(...) calls[#calls+1]={'ring',...} end,arc=function(...) calls[#calls+1]={'arc',...} end,
+    shield=function(...) calls[#calls+1]={'shield',...} end,hex=function(...) calls[#calls+1]={'hex',...} end,commit=function() calls[#calls+1]={'commit'} end,
     status=function() return 'fake' end}
 local loadlib_args
 package.loadlib=function(path,entry) loadlib_args={path,entry} return function() return fake end end
@@ -164,7 +189,7 @@ dofile('Wards.lua')
 check(loadlib_args[1]=='C:/Windower/addons/Wards/libs/_Wards.dll','loads its own renamed DLL')
 check(loadlib_args[2]=='luaopen__TargetSC','uses the TargetSC entry point')
 events.load()
-check(saved.settings_version==3 and saved.protect==false and saved.shell==false and saved.hp==false and saved.protect_shimmer==true,'fresh install: rings off, Protect shimmer on, version 3')
+check(saved.settings_version==3 and saved.protect==false and saved.shell==false and saved.hp==false and saved.protect_shimmer==true and saved.protect_expiry_glints==true and saved.protect_impact==true,'fresh install: rings off, Protect VFX on, version 3')
 -- Test1-3 checks below need the rings on.
 events['addon command']('protect','on') events['addon command']('shell','on') events['addon command']('hp','on')
 local function count_role(kind) local n=0 for _,c in ipairs(calls) do if c[1]==kind then n=n+1 end end return n end
@@ -203,7 +228,7 @@ events['addon command']('fade','in','1') check(saved.fade_in==1,'fade in set')
 events['addon command']('defaults') check(saved.gap==.08 and saved.shell_color=='element','defaults restored')
 check(saved.hp==false and saved.protect==false,'defaults: rings off (Test3)')
 events['addon command']('protect','on') events['addon command']('shell','on') events['addon command']('hp','on')
-before=#chat events['addon command']() check(#chat-before==34,'bare command shows help (title + 33 lines)')
+before=#chat events['addon command']() check(#chat-before==36,'bare command shows help (title + 35 lines)')
 events['addon command']('status') check(chat[#chat]=='Wards: fake','status ends with native status')
 -- HP ring in the addon
 player.buffs={} player.status=0 for _=1,30 do frame() end
@@ -290,7 +315,51 @@ events['addon command']('shimmer','opacity','0.25') check(saved.protect_shimmer_
 events['addon command']('shimmer','period','3') check(saved.protect_shimmer_period==3,'shimmer period is saved')
 events['addon command']('shimmer','duration','0.5') check(saved.protect_shimmer_duration==.5,'shimmer duration is saved')
 events['addon command']('shimmer','period','20') check(saved.protect_shimmer_period==3,'shimmer range is enforced')
-events['addon command']('defaults') check(saved.protect_shimmer==true and saved.protect_shimmer_opacity==.16,'defaults restore Protect shimmer')
+events['addon command']('defaults') check(saved.protect_shimmer==true and saved.protect_shimmer_opacity==.16 and saved.protect_expiry_glints==true and saved.protect_impact==true,'defaults restore Protect VFX')
+
+-- Expiration and impact previews plus packet-driven physical damage ----------------
+events['addon command']('test','expire')
+for _=1,4 do frame() end
+check(count('hex')==4,'test expire draws four small native hex glints')
+events['addon command']('test','off') frame()
+check(count('hex')==0,'test off clears expiry glints')
+
+events['addon command']('test','impact','5000')
+frame()
+check(count('shield')==1,'test impact draws the heading-oriented shield preview')
+events['addon command']('test','off') frame()
+check(count('shield')==0,'test off clears impact preview')
+
+player.buffs={40}
+frame() -- establish Protect-active state before the incoming hit
+packet_data={
+    Category=1,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Action Count']=2,
+    ['Target 1 Action 1 Message']=1,['Target 1 Action 1 Param']=20,
+    ['Target 1 Action 2 Message']=1,['Target 1 Action 2 Param']=30,
+}
+events['incoming chunk'](0x028,packet_data)
+frame()
+check(count('shield')==1,'melee packet matching the protected recipient triggers a shield')
+
+events['addon command']('test','off')
+packet_data={Category=3,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Action Count']=1,
+    ['Target 1 Action 1 Message']=1,['Target 1 Action 1 Param']=500}
+events['incoming chunk'](0x028,packet_data) frame()
+check(count('shield')==0,'weapon skill completion category is excluded')
+packet_data={Category=1,['Target Count']=1,['Target 1 ID']=999,['Target 1 Action Count']=1,
+    ['Target 1 Action 1 Message']=1,['Target 1 Action 1 Param']=500}
+events['incoming chunk'](0x028,packet_data) frame()
+check(count('shield')==0,'attacks on another entity are excluded')
+packet_data={Category=1,['Target Count']=1,['Target 1 ID']=me.id,['Target 1 Action Count']=1,
+    ['Target 1 Action 1 Message']=85,['Target 1 Action 1 Param']=0}
+events['incoming chunk'](0x028,packet_data) frame()
+check(count('shield')==0,'misses and non-damage action messages are excluded')
+
+-- Losing Protect emits the short glint sequence once.
+player.buffs={} for _=1,4 do frame() end
+check(count('hex')==4,'Protect removal emits expiration glints once')
+for _=1,30 do frame() end
+check(count('hex')==0,'expiration glints disperse and fade')
 
 -- Settings upgrade: a Test2 file (rings on, no version) gets them off once;
 -- a version-3 file keeps what A chose.
@@ -306,15 +375,19 @@ saved_file={}
 -- An old DLL (0.15.0) is refused with a clear message.
 fake_version='0.15.0' chat={}
 dofile('Wards.lua') events.load()
-local refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.2',1,true)~=nil end
+local refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.16.0',1,true)~=nil end
 check(refused,'old DLL refused with a message')
 
 -- Test4: the 0.15.1 DLL (no SceneHook owner thunks) is refused too.
 fake_version='0.15.1' chat={}
 dofile('Wards.lua') events.load()
-refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.15.2',1,true)~=nil end
+refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.16.0',1,true)~=nil end
 check(refused,'0.15.1 DLL (unload crash) refused with a message')
-fake_version='0.15.2'
+fake_version='0.15.2' chat={}
+dofile('Wards.lua') events.load()
+refused=false for _,l in ipairs(chat) do refused=refused or l:find('needs 0.16.0',1,true)~=nil end
+check(refused,'0.15.2 DLL refused because shield and hex are missing')
+fake_version='0.16.0'
 
 print(('Wards host simulation: %d passed, %d failed'):format(passes,fails))
 if fails>0 then os.exit(1) end
