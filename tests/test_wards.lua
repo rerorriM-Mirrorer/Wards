@@ -118,11 +118,13 @@ local function band_count(items)
     local n=0 for _ in pairs(seen) do n=n+1 end return n
 end
 check(#vfx.shimmer(shimmer_state,true,0,1,2,shimmer_opts,shimmer_color)==0,'shimmer waits before first pass')
-local shimmer_first=vfx.shimmer(shimmer_state,true,1,1,2,shimmer_opts,shimmer_color)
+vfx.shimmer(shimmer_state,true,1,1,2,shimmer_opts,shimmer_color) -- pass starts here
+local shimmer_first=vfx.shimmer(shimmer_state,true,1.2,1,2,shimmer_opts,shimmer_color)
 check(#shimmer_first==2 and shimmer_first[1].role=='glow' and shimmer_first[2].role=='core','shimmer emits one soft band')
-local shimmer_moving=vfx.shimmer(shimmer_state,true,1.2,1,2,shimmer_opts,shimmer_color)
+local shimmer_moving=vfx.shimmer(shimmer_state,true,1.4,1,2,shimmer_opts,shimmer_color)
 check(shimmer_moving[2].offset>shimmer_first[2].offset,'shimmer moves smoothly up the model')
-local shimmer_second=vfx.shimmer(shimmer_state,true,6.0,1,2,shimmer_opts,shimmer_color)
+vfx.shimmer(shimmer_state,true,6.0,1,2,shimmer_opts,shimmer_color) -- second pass starts here
+local shimmer_second=vfx.shimmer(shimmer_state,true,6.2,1,2,shimmer_opts,shimmer_color)
 check(band_count(shimmer_second)==1,'normal shimmer pass remains one band')
 vfx.shimmer(shimmer_state,true,10.8,1,2,shimmer_opts,shimmer_color)
 vfx.shimmer(shimmer_state,true,15.6,1,2,shimmer_opts,shimmer_color) -- fourth pass begins
