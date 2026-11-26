@@ -22,6 +22,7 @@ jobs:
       - name: Native 0.16.0 builds from native/; shipped DLL is a 0.16.0 renderer
         run: |
           i686-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -shared -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp -o /tmp/_Wards.dll native/TargetSC.cpp native/exports.def -ld3d8
+          i686-w64-mingw32-strip -s /tmp/_Wards.dll
           g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/property native/tests/test_property.cpp && /tmp/property
           g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/stroke native/tests/test_stroke.cpp && /tmp/stroke
           g++ -m32 -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -o /tmp/thunk native/tests/test_thunk.cpp && /tmp/thunk
@@ -34,3 +35,29 @@ jobs:
           name: wards-native-0.16.0
           path: /tmp/_Wards.dll
           if-no-files-found: error
+
+  publish-poc-renderer:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/development/protect-vfx-poc'
+    needs: wards
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the renderer built by the required checks
+        uses: actions/download-artifact@v4
+        with:
+          name: wards-native-0.16.0
+          path: /tmp/renderer
+      - name: Publish the exact checked renderer to the POC branch
+        run: |
+          install -D /tmp/renderer/_Wards.dll libs/_Wards.dll
+          if git diff --quiet -- libs/_Wards.dll; then
+            echo "Bundled renderer is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add libs/_Wards.dll
+          git commit -m "Build Wards native renderer 0.16.0"
+          git push

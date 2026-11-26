@@ -1081,7 +1081,7 @@ void emit_shield(Position const& base,float heading,Shield const& shield,D3DVIEW
     // Each cell is wholly inside the disk, so no line can escape its rim.
     // A radial wave briefly brightens each cell as it travels across the face.
     if(!(shield.honeycomb>>24)||shield.hex_radius<=0.f||shield.wave_width<=0.f)return;
-    const float size=std::min(shield.hex_radius,shield.radius*.22f);
+    const float size=std::max(std::min(shield.hex_radius,shield.radius*.22f),shield.radius*.04f);
     const float row_step=1.73205080757f*size;
     const float col_step=1.5f*size;
     const int max_rows=static_cast<int>(std::ceil(shield.radius/row_step));

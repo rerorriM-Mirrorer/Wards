@@ -23,5 +23,5 @@ int main() {
     const Point odd=wards_shield::grid_center(0,1,1.f);
     assert(std::fabs(even.x)<.0001f && std::fabs(even.y)<.0001f);
     assert(std::fabs(odd.x-.75f)<.0001f && std::fabs(odd.y-1.7320508f)<.0001f);
-    std::cout << "Shield geometry: 10 assertions passed\n";
+    std::cout << "Shield geometry: 11 assertions passed\n";
 }
