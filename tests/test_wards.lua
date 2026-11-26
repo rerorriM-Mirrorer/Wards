@@ -9,6 +9,7 @@ local function check(cond,msg) if cond then passes=passes+1 else fails=fails+1 p
 local function near(a,b,e) return math.abs(a-b)<=(e or 1e-6) end
 
 local model=require('wards_model')
+local vfx=require('wards_vfx')
 
 -- Model: buff IDs and detection
 check(model.BUFF.protect==40 and model.BUFF.shell==41,'buff ids 40/41')
@@ -107,6 +108,27 @@ check(not has(zero,'core') and has(zero,'back'),'0%: black circle, no pink')
 check(near(model.hp_offset(h,opts),hp+.08*h),'HP ring above protect')
 check(model.hp_color('pinkwhite')[2]==215 and model.hp_color('1,2,3')[3]==3 and model.hp_color('x')==nil,'hp colors')
 
+
+-- Protect shimmer animation model --------------------------------------------
+local shimmer_state=vfx.new_shimmer_state()
+local shimmer_opts={ground=.3,protect_shimmer_opacity=.16,protect_shimmer_period=4.8,protect_shimmer_duration=.75}
+local shimmer_color={65,130,255}
+local function band_count(items)
+    local seen={} for _,item in ipairs(items) do seen[item.band]=true end
+    local n=0 for _ in pairs(seen) do n=n+1 end return n
+end
+check(#vfx.shimmer(shimmer_state,true,0,1,2,shimmer_opts,shimmer_color)==0,'shimmer waits before first pass')
+local shimmer_first=vfx.shimmer(shimmer_state,true,1,1,2,shimmer_opts,shimmer_color)
+check(#shimmer_first==2 and shimmer_first[1].role=='glow' and shimmer_first[2].role=='core','shimmer emits one soft band')
+local shimmer_moving=vfx.shimmer(shimmer_state,true,1.2,1,2,shimmer_opts,shimmer_color)
+check(shimmer_moving[2].offset>shimmer_first[2].offset,'shimmer moves smoothly up the model')
+local shimmer_second=vfx.shimmer(shimmer_state,true,6.0,1,2,shimmer_opts,shimmer_color)
+check(band_count(shimmer_second)==1,'normal shimmer pass remains one band')
+vfx.shimmer(shimmer_state,true,10.8,1,2,shimmer_opts,shimmer_color)
+local shimmer_double=vfx.shimmer(shimmer_state,true,15.6,1,2,shimmer_opts,shimmer_color)
+check(band_count(shimmer_double)==2 and #shimmer_double==4,'occasional double pass stays at two bands')
+check(#vfx.shimmer(shimmer_state,false,15.7,1,2,shimmer_opts,shimmer_color)==0 and not shimmer_state.active,'shimmer resets when disabled')
+
 -- Addon smoke test with stubbed Windower -----------------------------------
 local chat,calls,events,sent={},{},{},{}
 local clock=0
@@ -138,7 +160,7 @@ dofile('Wards.lua')
 check(loadlib_args[1]=='C:/Windower/addons/Wards/libs/_Wards.dll','loads its own renamed DLL')
 check(loadlib_args[2]=='luaopen__TargetSC','uses the TargetSC entry point')
 events.load()
-check(saved.settings_version==3 and saved.protect==false and saved.shell==false and saved.hp==false,'fresh install: P/S/HP off, version 3')
+check(saved.settings_version==3 and saved.protect==false and saved.shell==false and saved.hp==false and saved.protect_shimmer==true,'fresh install: rings off, Protect shimmer on, version 3')
 -- Test1-3 checks below need the rings on.
 events['addon command']('protect','on') events['addon command']('shell','on') events['addon command']('hp','on')
 local function count_role(kind) local n=0 for _,c in ipairs(calls) do if c[1]==kind then n=n+1 end end return n end
@@ -177,7 +199,7 @@ events['addon command']('fade','in','1') check(saved.fade_in==1,'fade in set')
 events['addon command']('defaults') check(saved.gap==.08 and saved.shell_color=='element','defaults restored')
 check(saved.hp==false and saved.protect==false,'defaults: rings off (Test3)')
 events['addon command']('protect','on') events['addon command']('shell','on') events['addon command']('hp','on')
-before=#chat events['addon command']() check(#chat-before==30,'bare command shows help (title + 29 lines)')
+before=#chat events['addon command']() check(#chat-before==34,'bare command shows help (title + 33 lines)')
 events['addon command']('status') check(chat[#chat]=='Wards: fake','status ends with native status')
 -- HP ring in the addon
 player.buffs={} player.status=0 for _=1,30 do frame() end
@@ -246,6 +268,20 @@ events['addon command']('debuff','stun','settings') check(chat[#chat]:find('spin
 events['addon command']('status')
 for _,line in ipairs(chat) do check(not line:find('\226\128[\147\148]'),'ASCII only: '..line) end
 events['addon command']('defaults') check(saved.debuff_spacing==.08 and saved.paralysis_flash_every==1.6 and saved.settings_version==3 and saved.protect==false,'defaults restore debuffs, keep version 3')
+
+-- Protect shimmer preview path (without a live Protect buff) -----------------
+events['addon command']('debuffs','off')
+events['addon command']('hp','off')
+events['addon command']('protect','off') events['addon command']('shell','off')
+events['addon command']('preview','off')
+player.buffs={} player.status=0
+events['addon command']('shimmer','on')
+events['addon command']('test','shimmer')
+for _=1,38 do frame() end
+check(count('ring')==2,'test shimmer draws one faint band without the buff')
+events['addon command']('shimmer','off') frame()
+check(count('ring')==0,'shimmer toggle hides the preview immediately')
+events['addon command']('test','off')
 
 -- Settings upgrade: a Test2 file (rings on, no version) gets them off once;
 -- a version-3 file keeps what A chose.

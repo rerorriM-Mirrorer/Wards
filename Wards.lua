@@ -5,18 +5,20 @@
 -- Author: A.
 _addon.name='Wards'
 _addon.author='A'
-_addon.version='0.3.1-test4'
+_addon.version='0.3.2-test5'
 _addon.commands={'wards'}
 
 require('chat')
 local config=require('config')
 local model=require('wards_model')
+local vfx=require('wards_vfx')
 local dbf=require('wards_debuffs')
 
 -- Defaults = rings/HP ring (wards_model) + debuffs (wards_debuffs).
 -- settings_version: 3 = Test3 upgrade done (see below).
 local defaults={settings_version=0}
 for k,v in pairs(model.defaults) do defaults[k]=v end
+for k,v in pairs(vfx.defaults) do defaults[k]=v end
 for k,v in pairs(dbf.defaults()) do defaults[k]=v end
 local settings=config.load(defaults)
 -- One-time Test3 upgrade: Protect, Shell and the HP ring are now off by
@@ -77,8 +79,9 @@ local function clear() if native then native.clear() end end
 
 -- Per-ring fade state and test overrides (test = show even without the buff).
 local fades={protect=model.new_fade(),shell=model.new_fade(),hp=model.new_fade()}
-local test={protect=false,shell=false,hp=false}
+local test={protect=false,shell=false,hp=false,shimmer=false}
 local hp_state=model.hp_new()
+local shimmer_state=vfx.new_shimmer_state()
 local preview_hp=nil -- //wards preview hp <n>: shows the ring with this HP% instead of yours
 local dbf_state=dbf.new_state()
 local preview_debuffs={} -- //wards preview debuff <name>|all: shown without the debuff
@@ -114,7 +117,7 @@ local function draw()
     local me,player=self_mob()
     if not me then
         fades.protect.alpha,fades.shell.alpha,fades.hp.alpha=0,0,0
-        model.hp_reset(hp_state) dbf.reset(dbf_state)
+        model.hp_reset(hp_state) dbf.reset(dbf_state) vfx.reset_shimmer(shimmer_state)
         clear() return
     end
     local want_p=settings.protect and (test.protect or model.has(player.buffs,model.BUFF.protect))
@@ -134,7 +137,10 @@ local function draw()
     -- Debuffs: stacked from just above the HP ring's position upward.
     local debuff_items=dbf.frame(dbf_state,player.buffs,preview_debuffs,now,dt,settings,
         model.hp_offset(height,settings)+settings.debuff_gap*height,height,radius,dbf.front_degrees(me.facing))
-    if #rings==0 and #items==0 and #debuff_items==0 then clear() return end
+    local shimmer_enabled=settings.protect_shimmer and (test.shimmer or model.has(player.buffs,model.BUFF.protect))
+    local shimmer_items=vfx.shimmer(shimmer_state,shimmer_enabled,now,radius,height,settings,
+        model.color('protect',settings.protect_color) or model.colors.protect.element)
+    if #rings==0 and #items==0 and #debuff_items==0 and #shimmer_items==0 then clear() return end
     native.begin(me.index,me.id)
     local sent=0
     for _,a in ipairs(items) do
@@ -151,6 +157,11 @@ local function draw()
         else native.arc(d.radius,d.offset,0,d.lead,d.tail,d.pixels,0,d.start,d.span,d.fade,1,d.curve,d.dir,0) end
         sent=sent+1
     end
+    for _,s in ipairs(shimmer_items) do
+        if sent>=MAX_ITEMS then break end
+        native.ring(s.radius,s.offset,0,s.color,s.pixels)
+        sent=sent+1
+    end
     native.commit()
 end
 
@@ -160,6 +171,10 @@ local help_lines={
     {'status','Version, renderer, buffs seen and every setting.'},
     {'on | off','Turn all Wards drawing on or off.'},
     {'protect [on|off]','Show or hide the Protect ring (bare = toggle).'},
+    {'shimmer [on|off]','Protect idle shimmer, separate from the ring (default on).'},
+    {'shimmer opacity <0.01-0.40>','Maximum core alpha (default 0.16).'},
+    {'shimmer period <2-12>','Seconds between passes (default 4.8).'},
+    {'shimmer duration <0.25-1.5>','Seconds per pass (default 0.75).'},
     {'shell [on|off]','Show or hide the Shell ring (bare = toggle).'},
     {'test <protect|shell|both|off>','Show rings without the buff, for tuning.'},
     {'color <protect|shell> <element|icon|iconlight|R,G,B>','Ring color (element = TargetSC Water / Wind).'},
@@ -201,15 +216,18 @@ local hp_order -- HP setting names, in display order (filled in below)
 local function status()
     local _,player=self_mob()
     local buffs=player and player.buffs
-    say(('v%s; enabled=%s renderer=%s; protect=%s shell=%s; test protect=%s shell=%s'):format(_addon.version,
+    say(('v%s; enabled=%s renderer=%s; protect=%s shell=%s shimmer=%s; test protect=%s shell=%s shimmer=%s'):format(_addon.version,
         tostring(settings.enabled),native and (renderer_started and 'running' or 'stopped') or ('unavailable ('..tostring(renderer_error)..')'),
-        tostring(settings.protect),tostring(settings.shell),tostring(test.protect),tostring(test.shell)))
+        tostring(settings.protect),tostring(settings.shell),tostring(settings.protect_shimmer),
+        tostring(test.protect),tostring(test.shell),tostring(test.shimmer)))
     say(('buffs seen: Protect=%s Shell=%s; fade alpha protect=%.2f shell=%.2f'):format(
         tostring(model.has(buffs,model.BUFF.protect)),tostring(model.has(buffs,model.BUFF.shell)),fades.protect.alpha,fades.shell.alpha))
     say(('color protect=%s shell=%s; height=%.2f scale=%.2f level=%.2f gap=%.2f ground=%.2f'):format(
         settings.protect_color,settings.shell_color,settings.height,settings.scale,settings.level,settings.gap,settings.ground))
     say(('opacity=%.2f glow=%.2f width=%s; fade in=%.2fs out=%.2fs'):format(
         settings.opacity,settings.glow,settings.width,settings.fade_in,settings.fade_out))
+    say(('shimmer opacity=%.2f period=%.2fs duration=%.2fs'):format(
+        settings.protect_shimmer_opacity,settings.protect_shimmer_period,settings.protect_shimmer_duration))
     say(('hp ring=%s test=%s preview=%s fade=%.2f shown=%.2f trail=%.2f'):format(tostring(settings.hp),tostring(test.hp),
         tostring(preview_hp or 'off'),fades.hp.alpha,hp_state.shown,hp_state.trail))
     local parts={}
@@ -304,19 +322,40 @@ end
 handlers.help=help
 handlers.status=status
 handlers.on=function() settings.enabled=true config.save(settings) start_renderer() say('On.') end
-handlers.off=function() settings.enabled=false config.save(settings) clear() say('Off.') end
+handlers.off=function() settings.enabled=false config.save(settings) vfx.reset_shimmer(shimmer_state) clear() say('Off.') end
 for _,kind in ipairs({'protect','shell'}) do
     handlers[kind]=function(value)
         local v=onoff(value,kind) if v==nil then return end
         settings[kind]=v config.save(settings) say(kind..' ring '..(v and 'on' or 'off')..'.')
     end
 end
+local shimmer_ranges={opacity={.01,.4},period={2,12},duration={.25,1.5}}
+handlers.shimmer=function(which,value)
+    local range=shimmer_ranges[which]
+    if range then
+        local n=tonumber(value)
+        if not n or n<range[1] or n>range[2] then
+            say(('Use //wards shimmer %s <%s-%s>.'):format(which,range[1],range[2])) return
+        end
+        settings['protect_shimmer_'..which]=n config.save(settings)
+        say(('shimmer %s = %.2f'):format(which,n)) return
+    end
+    local enabled
+    if which==nil then enabled=not settings.protect_shimmer
+    elseif which=='on' then enabled=true
+    elseif which=='off' then enabled=false
+    else say('Use //wards shimmer [on|off], opacity <0.01-0.40>, period <2-12>, duration <0.25-1.5>.') return end
+    settings.protect_shimmer=enabled
+    if not enabled then vfx.reset_shimmer(shimmer_state) end
+    config.save(settings) say('Protect shimmer '..(enabled and 'on.' or 'off.'))
+end
 handlers.test=function(which)
-    if which=='protect' or which=='shell' or which=='hp' then test[which]=not test[which]
+    if which=='protect' or which=='shell' or which=='hp' or which=='shimmer' then test[which]=not test[which]
     elseif which=='both' then test.protect,test.shell=true,true
-    elseif which=='off' then test.protect,test.shell,test.hp=false,false,false
-    else say('Use //wards test protect|shell|hp|both|off.') return end
-    say(('Test: protect=%s shell=%s hp=%s (test rings ignore buffs and combat).'):format(tostring(test.protect),tostring(test.shell),tostring(test.hp)))
+    elseif which=='off' then test.protect,test.shell,test.hp,test.shimmer=false,false,false,false
+    else say('Use //wards test protect|shell|hp|shimmer|both|off.') return end
+    say(('Test: protect=%s shell=%s hp=%s shimmer=%s (test overrides ignore buffs and combat).'):format(
+        tostring(test.protect),tostring(test.shell),tostring(test.hp),tostring(test.shimmer)))
 end
 handlers.color=function(kind,...)
     local value=table.concat({...},'')
@@ -395,11 +434,13 @@ end
 handlers.defaults=function()
     for k,v in pairs(defaults) do settings[k]=v end
     settings.settings_version=3
+    vfx.reset_shimmer(shimmer_state)
     config.save(settings) say('All settings restored to defaults.')
 end
 for name in pairs(ranges) do handlers[name]=function(value) set_number(name,value) end end
 local function lifecycle(command)
     say(command=='restart' and 'Restarting.' or 'Unloading.')
+    vfx.reset_shimmer(shimmer_state)
     clear() if native and renderer_started then native.stop() renderer_started=false end
     windower.send_command(command=='restart' and 'lua reload Wards' or 'lua unload Wards')
 end
@@ -419,6 +460,7 @@ windower.register_event('load',function()
     if upgraded then say('Test3: Protect, Shell and HP rings are now off by default (//wards protect on, shell on, hp on).') end
 end)
 windower.register_event('zone change','logout',function()
-    fades.protect.alpha,fades.shell.alpha,fades.hp.alpha=0,0,0 model.hp_reset(hp_state) dbf.reset(dbf_state) clear()
+    fades.protect.alpha,fades.shell.alpha,fades.hp.alpha=0,0,0 model.hp_reset(hp_state) dbf.reset(dbf_state)
+    vfx.reset_shimmer(shimmer_state) clear()
 end)
-windower.register_event('unload',function() clear() if native then native.stop() end end)
+windower.register_event('unload',function() vfx.reset_shimmer(shimmer_state) clear() if native then native.stop() end end)
