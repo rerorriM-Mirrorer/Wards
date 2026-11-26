@@ -11,6 +11,7 @@
 #include "SceneHook/SceneHook.h"
 #include "StrokeGeometry.h"
 #include "PropertyGeometry.h"
+#include "ShieldGeometry.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -102,9 +103,22 @@ struct Glyph3 {float radius=0,offset=0,rotation=0;DWORD color=0;targetsc::Glyph3
 // 0.12.0: straight lines (kill seams), target-relative world units, z up.
 constexpr int kMaxLines=8;
 struct Line {float x1=0,y1=0,z1=0,x2=0,y2=0,z2=0;DWORD color=0;float pixels=1;};
-struct Frame {DWORD index=0, id=0, tick=0;int count=0,disc_count=0,glyph_count=0,line_count=0,shimmer_count=0;
+// 0.16.0: one heading-oriented vertical surface; its honeycomb is generated
+// into the same bounded triangle batch during the scene draw.
+constexpr int kMaxShields=1;
+constexpr int kMaxShieldCells=96;
+struct Shield {
+    float distance=0,offset=0,radius=0;
+    DWORD center=0,edge=0,outline=0,honeycomb=0;
+    float hex_radius=0,wave=0,wave_width=0,pixels=0;
+};
+// 0.16.0: small hexagonal glints billboarded toward the current camera.
+constexpr int kMaxHexes=8;
+struct Hex {float x=0,y=0,z=0,radius=0,rotation=0;DWORD color=0;float pixels=1;};
+struct Frame {DWORD index=0, id=0, tick=0;int count=0,disc_count=0,glyph_count=0,line_count=0,shimmer_count=0,shield_count=0,hex_count=0;
     float shift_e=0,shift_n=0; // current native.shift, stamped on each piece added after it
-    Ring rings[kMaxRings]{};Disc discs[kMaxDiscs]{};Glyph3 glyphs[kMaxGlyphs3]{};Line lines[kMaxLines]{};};
+    Ring rings[kMaxRings]{};Disc discs[kMaxDiscs]{};Glyph3 glyphs[kMaxGlyphs3]{};Line lines[kMaxLines]{};
+    Shield shields[kMaxShields]{};Hex hexes[kMaxHexes]{};};
 SRWLOCK g_frame_lock=SRWLOCK_INIT;
 Frame g_pending{}, g_frame{};
 volatile LONG g_frames=0, g_draws=0, g_tracking_failures=0, g_state_failures=0;
@@ -315,7 +329,8 @@ std::uintptr_t entity_array() {
     return g_entity_array;
 }
 
-bool live_position(DWORD index, Position& out, float* heading_out) {
+bool live_position(DWORD index, Position& out, float* heading_out, bool* heading_valid_out=nullptr) {
+    if(heading_valid_out)*heading_valid_out=false;
     std::uintptr_t const base = entity_array();
     if (base == 0 || index == 0 || index >= kMaxIndex) {
         return false;
@@ -363,6 +378,7 @@ bool live_position(DWORD index, Position& out, float* heading_out) {
                     sizeof(heading));
                 if (std::isfinite(heading)) {
                     *heading_out = heading;
+                    if(heading_valid_out)*heading_valid_out=true;
                 }
             }
         }
@@ -735,12 +751,11 @@ bool project(Position const& p,D3DVIEWPORT8 const& v, DrawVertex& out,DWORD colo
 constexpr int kMaxShimmerDiscs=4; // 0.15.0: discs per frame drawn with a glyph shimmer
 constexpr int kMaxVertices=(kMaxRings+kMaxDiscs)*ring_slices_*6+
     kMaxDiscs*(ring_slices_*9+targetsc::kGlyphLines*6)+
-    kMaxShimmerDiscs*targetsc::kGlyphLines*targetsc::kShimmerPieces*6+ // 0.15.0 subdivided lines
-    kMaxGlyphs3*(targetsc::kGlyphLines+ring_slices_)*6+ // 0.11.0 3D glyph lines + circle
-    kMaxLines*6; // 0.12.0 seam lines
-// 0.13.0: 20 glyph lines (cap lines removed); a clipped disc rim draws at most
-// ring_slices_ strokes, inside its ring_slices_*6 allowance above.
-static_assert(kMaxVertices==47760,"Review bounded storage when glyph complexity changes");
+    kMaxShimmerDiscs*targetsc::kGlyphLines*targetsc::kShimmerPieces*6+
+    kMaxGlyphs3*(targetsc::kGlyphLines+ring_slices_)*6+
+    kMaxLines*6+
+    kMaxShields*(ring_slices_*12+kMaxShieldCells*36)+kMaxHexes*36;
+static_assert(kMaxVertices==52272,"Review bounded storage when native VFX geometry changes");
 DrawVertex g_vertices[kMaxVertices]{};
 unsigned g_vertex_count=0;
 void triangle(DrawVertex a,DrawVertex b,DrawVertex c) {
@@ -1010,26 +1025,113 @@ void emit_glyph3(Position const& base,Glyph3 const& g,D3DVIEWPORT8 const& viewpo
             targetsc::glyph3_tilt({ring_cos_[n],ring_sin_[n],0.f},g.params.tilt),viewport);
     }
 }
-// 0.12.0: one straight line in target-relative world units (z up).
-void emit_line(Position const& base,Line const& l,D3DVIEWPORT8 const& viewport) {
-    if(!(l.color>>24))return;
+// Shared pixel-width stroke. World positions are projected to the same
+// transformed, depth-tested D3D8 surface used by the existing ring renderer.
+void emit_world_stroke(Position const& pa,Position const& pb,DWORD color,float pixels,
+    D3DVIEWPORT8 const& viewport) {
+    if(!(color>>24))return;
     DrawVertex a{},b{};
-    if(!project(Position{base.east+l.x1,base.north+l.y1,base.height-l.z1},viewport,a,l.color)||
-       !project(Position{base.east+l.x2,base.north+l.y2,base.height-l.z2},viewport,b,l.color))return;
+    if(!project(pa,viewport,a,color)||!project(pb,viewport,b,color))return;
     const float dx=b.x-a.x,dy=b.y-a.y,length=std::hypot(dx,dy);
     if(length<.0001f)return;
-    const float half=std::max(.5f,l.pixels*.5f);
+    const float half=std::max(.5f,pixels*.5f);
     const float nx=-dy*half/length,ny=dx*half/length;
     auto c=a,d=b;a.x-=nx;a.y-=ny;b.x-=nx;b.y-=ny;
     c.x+=nx;c.y+=ny;d.x+=nx;d.y+=ny;triangle(a,c,b);triangle(b,c,d);
+}
+// 0.12.0: one straight line in target-relative world units (z up).
+void emit_line(Position const& base,Line const& l,D3DVIEWPORT8 const& viewport) {
+    if(!(l.color>>24))return;
+    emit_world_stroke(
+        Position{base.east+l.x1,base.north+l.y1,base.height-l.z1},
+        Position{base.east+l.x2,base.north+l.y2,base.height-l.z2},
+        l.color,l.pixels,viewport);
+}
+void emit_shield(Position const& base,float heading,Shield const& shield,D3DVIEWPORT8 const& viewport) {
+    if(shield.radius<=0.f)return;
+    // TargetRing's verified FFXI convention: negate heading because the
+    // game's third ground coordinate increases southward in our east/north plane.
+    const float aim=-heading,fx=std::cos(aim),fy=std::sin(aim);
+    const float sx=-fy,sy=fx;
+    const Position center{
+        base.east+fx*shield.distance,
+        base.north+fy*shield.distance,
+        base.height-shield.offset
+    };
+    DrawVertex hub{};
+    if(!project(center,viewport,hub,shield.center))return;
+    DrawVertex edge[ring_slices_]{};
+    Position perimeter[ring_slices_]{};
+    bool valid[ring_slices_]{};
+    for(int i=0;i<ring_slices_;++i) {
+        const float angle=6.28318530718f*static_cast<float>(i)/ring_slices_;
+        const float u=shield.radius*std::cos(angle),v=shield.radius*std::sin(angle);
+        perimeter[i]={center.east+sx*u,center.north+sy*u,center.height-v};
+        valid[i]=project(perimeter[i],viewport,edge[i],shield.edge);
+    }
+    for(int i=0;i<ring_slices_;++i) {
+        const int next=(i+1)%ring_slices_;
+        if(!valid[i]||!valid[next])continue;
+        auto a=hub,b=edge[i],c=edge[next];
+        a.color=shield.center;b.color=shield.edge;c.color=shield.edge;
+        triangle(a,b,c);
+        emit_world_stroke(perimeter[i],perimeter[next],shield.outline,shield.pixels,viewport);
+    }
+
+    // Each cell is wholly inside the disk, so no line can escape its rim.
+    // A radial wave briefly brightens each cell as it travels across the face.
+    if(!(shield.honeycomb>>24)||shield.hex_radius<=0.f||shield.wave_width<=0.f)return;
+    const float size=std::min(shield.hex_radius,shield.radius*.22f);
+    const float row_step=1.73205080757f*size;
+    const float col_step=1.5f*size;
+    const int max_rows=static_cast<int>(std::ceil(shield.radius/row_step));
+    const int max_cols=static_cast<int>(std::ceil(shield.radius/col_step))+1;
+    const float wave_radius=shield.wave*shield.radius;
+    const float wave_width=shield.wave_width*shield.radius;
+    int cells=0;
+    for(int row=-max_rows;row<=max_rows&&cells<kMaxShieldCells;++row) {
+        const float local_y=static_cast<float>(row)*row_step;
+        const float row_offset=(row%2)!=0?size*.75f:0.f;
+        for(int col=-max_cols;col<=max_cols&&cells<kMaxShieldCells;++col) {
+            const float local_x=static_cast<float>(col)*col_step+row_offset;
+            if(!wards_shield::cell_inside_circle(local_x,local_y,size,shield.radius))continue;
+            ++cells;
+            const float distance=std::hypot(local_x,local_y);
+            const float alpha=wards_shield::wave_alpha(distance,wave_radius,wave_width);
+            if(alpha<=.001f)continue;
+            const DWORD color=targetsc::scale_alpha(shield.honeycomb,alpha);
+            for(int side=0;side<6;++side) {
+                const auto a=wards_shield::hex_vertex(local_x,local_y,size,side,0.f);
+                const auto b=wards_shield::hex_vertex(local_x,local_y,size,(side+1)%6,0.f);
+                emit_world_stroke(
+                    Position{center.east+sx*a.x,center.north+sy*a.x,center.height-a.y},
+                    Position{center.east+sx*b.x,center.north+sy*b.x,center.height-b.y},
+                    color,1.f,viewport);
+            }
+        }
+    }
+}
+void emit_hex(Position const& base,Hex const& hex,D3DVIEWPORT8 const& viewport) {
+    if(!(hex.color>>24)||hex.radius<=0.f)return;
+    // A tiny billboard perpendicular to the current camera ray. Its own
+    // horizontal axis is stable in world space for this frame.
+    const float sx=-std::sin(g_camera_angle),sy=std::cos(g_camera_angle);
+    const Position center{base.east+hex.x,base.north+hex.y,base.height-hex.z};
+    Position points[6]{};
+    for(int i=0;i<6;++i) {
+        const float angle=hex.rotation+6.28318530718f*static_cast<float>(i)/6.f;
+        const float u=hex.radius*std::cos(angle),v=hex.radius*std::sin(angle);
+        points[i]={center.east+sx*u,center.north+sy*u,center.height-v};
+    }
+    for(int i=0;i<6;++i)emit_world_stroke(points[i],points[(i+1)%6],hex.color,hex.pixels,viewport);
 }
 void draw_all_rings() {
     Frame f{};
     AcquireSRWLockShared(&g_frame_lock); f=g_frame; ReleaseSRWLockShared(&g_frame_lock);
     // A stopped/erroring Lua state cannot leave a permanent frozen resonance.
-    if ((!f.count && !f.disc_count && !f.glyph_count && !f.line_count) || GetTickCount()-f.tick>250 || !d3d_device_) return;
-    Position base{};
-    if (!live_position(f.index,base,nullptr)) {InterlockedIncrement(&g_tracking_failures); return;}
+    if ((!f.count && !f.disc_count && !f.glyph_count && !f.line_count && !f.shield_count && !f.hex_count) || GetTickCount()-f.tick>250 || !d3d_device_) return;
+    Position base{};float heading=0.f;bool heading_valid=false;
+    if (!live_position(f.index,base,f.shield_count?&heading:nullptr,&heading_valid)) {InterlockedIncrement(&g_tracking_failures); return;}
     auto* dev=static_cast<IDirect3DDevice8*>(d3d_device_);
     D3DMATRIX view{},projection{}; D3DVIEWPORT8 viewport{};
     if (FAILED(dev->GetTransform(D3DTS_VIEW,&view)) || FAILED(dev->GetTransform(D3DTS_PROJECTION,&projection))
@@ -1070,9 +1172,11 @@ void draw_all_rings() {
         // cores. One bounded native submission per visible frame.
         auto shifted=[&](float dx,float dy){return Position{base.east+dx,base.north+dy,base.height};};
         for(int i=0;i<f.disc_count;++i)emit_disc(shifted(f.discs[i].dx,f.discs[i].dy),f.discs[i],viewport);
+        if(heading_valid)for(int i=0;i<f.shield_count;++i)emit_shield(base,heading,f.shields[i],viewport);
         for(int i=0;i<f.glyph_count;++i)emit_glyph3(shifted(f.glyphs[i].dx,f.glyphs[i].dy),f.glyphs[i],viewport);
         for(int i=0;i<f.count;++i)emit_ring(shifted(f.rings[i].dx,f.rings[i].dy),f.rings[i],viewport);
         for(int i=0;i<f.line_count;++i)emit_line(base,f.lines[i],viewport);
+        for(int i=0;i<f.hex_count;++i)emit_hex(base,f.hexes[i],viewport);
         if(g_vertex_count && SUCCEEDED(dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST,g_vertex_count/3,g_vertices,sizeof(DrawVertex))))
             InterlockedIncrement(&g_draws);
     } else InterlockedIncrement(&g_state_failures);
@@ -1275,6 +1379,34 @@ int __cdecl lua_shift(lua_State* L) {
     return 0;
 }
 // 0.12.0 native.line(x1,y1,z1,x2,y2,z2,color,pixels): target-relative, z up.
+int __cdecl lua_shield(lua_State* L) {
+    if(!g_pending.index||g_pending.shield_count>=kMaxShields||g_lua.gettop(L)<11)return 0;
+    double v[11];for(int i=0;i<11;++i){v[i]=g_lua.tonumber(L,i+1);if(!std::isfinite(v[i]))return 0;}
+    if(v[0]<0||v[0]>30||std::fabs(v[1])>1000||v[2]<.05||v[2]>30||
+       v[3]<0||v[3]>4294967295.0||v[4]<0||v[4]>4294967295.0||
+       v[5]<0||v[5]>4294967295.0||v[6]<0||v[6]>4294967295.0||
+       v[7]<.01||v[7]>5||v[8]<0||v[8]>1.5||v[9]<.01||v[9]>1||v[10]<0||v[10]>64)return 0;
+    Shield shield{};
+    shield.distance=static_cast<float>(v[0]);shield.offset=static_cast<float>(v[1]);
+    shield.radius=static_cast<float>(v[2]);shield.center=static_cast<DWORD>(v[3]);
+    shield.edge=static_cast<DWORD>(v[4]);shield.outline=static_cast<DWORD>(v[5]);
+    shield.honeycomb=static_cast<DWORD>(v[6]);shield.hex_radius=static_cast<float>(v[7]);
+    shield.wave=static_cast<float>(v[8]);shield.wave_width=static_cast<float>(v[9]);
+    shield.pixels=static_cast<float>(v[10]);
+    g_pending.shields[g_pending.shield_count++]=shield;
+    return 0;
+}
+int __cdecl lua_hex(lua_State* L) {
+    if(!g_pending.index||g_pending.hex_count>=kMaxHexes||g_lua.gettop(L)<6)return 0;
+    double v[7];for(int i=0;i<7;++i){v[i]=i<g_lua.gettop(L)?g_lua.tonumber(L,i+1):1;if(!std::isfinite(v[i]))return 0;}
+    if(std::fabs(v[0])>100||std::fabs(v[1])>100||std::fabs(v[2])>100||
+       v[3]<.01||v[3]>5||std::fabs(v[4])>1000000||v[5]<0||v[5]>4294967295.0||v[6]<0||v[6]>64)return 0;
+    Hex hex{};hex.x=static_cast<float>(v[0]);hex.y=static_cast<float>(v[1]);hex.z=static_cast<float>(v[2]);
+    hex.radius=static_cast<float>(v[3]);hex.rotation=static_cast<float>(v[4]);
+    hex.color=static_cast<DWORD>(v[5]);hex.pixels=static_cast<float>(v[6]);
+    g_pending.hexes[g_pending.hex_count++]=hex;
+    return 0;
+}
 int __cdecl lua_line(lua_State* L) {
     if(!g_pending.index||g_pending.line_count>=kMaxLines||g_lua.gettop(L)<7)return 0;
     double v[8];for(int i=0;i<8;++i){v[i]=i<g_lua.gettop(L)?g_lua.tonumber(L,i+1):1;if(!std::isfinite(v[i]))return 0;}
@@ -1290,13 +1422,13 @@ int __cdecl lua_commit(lua_State*) {
     g_pending.tick=GetTickCount();
     AcquireSRWLockExclusive(&g_frame_lock);g_frame=g_pending;ReleaseSRWLockExclusive(&g_frame_lock);return 0;
 }
-int __cdecl lua_version(lua_State* L){g_lua.pushstring(L,"0.15.2");return 1;}
+int __cdecl lua_version(lua_State* L){g_lua.pushstring(L,"0.16.0");return 1;}
 int __cdecl lua_status(lua_State* L) {
     char bus[224]{},report[768]{};scenehook_describe(g_bus,g_bus_slot,bus,sizeof(bus));
     Frame f{};AcquireSRWLockShared(&g_frame_lock);f=g_frame;ReleaseSRWLockShared(&g_frame_lock);
-    std::snprintf(report,sizeof(report),"TargetSC 0.15.2 %s; glyph=traced; frames=%ld draws=%ld device=%s entity_array=%s tracking_failures=%ld state_failures=%ld rings=%d discs=%d entity=%lu/index=%lu | %s",
+    std::snprintf(report,sizeof(report),"TargetSC 0.16.0 %s; glyph=traced; shield=heading; frames=%ld draws=%ld device=%s entity_array=%s tracking_failures=%ld state_failures=%ld rings=%d discs=%d shields=%d hexes=%d entity=%lu/index=%lu | %s",
         g_status,g_frames,g_draws,d3d_device_?"ready":"pending",g_entity_array?"ready":"pending",
-        g_tracking_failures,g_state_failures,f.count,f.disc_count,static_cast<unsigned long>(f.id),static_cast<unsigned long>(f.index),bus);
+        g_tracking_failures,g_state_failures,f.count,f.disc_count,f.shield_count,f.hex_count,static_cast<unsigned long>(f.id),static_cast<unsigned long>(f.index),bus);
     g_lua.pushstring(L,report);return 1;
 }
 bool bind_lua() {
@@ -1337,10 +1469,11 @@ bool bind_lua() {
 } // namespace
 extern "C" __declspec(dllexport) int __cdecl luaopen__TargetSC(lua_State* L) {
     if(!bind_lua())return 0;
-    build_tables();clear_frame();g_lua.createtable(L,0,13);
+    build_tables();clear_frame();g_lua.createtable(L,0,15);
     struct Entry {char const* name;lua_CFunction fn;};
     const Entry entries[]={{"start",lua_start},{"stop",lua_stop},{"clear",lua_clear},{"begin",lua_begin},
-        {"ring",lua_ring},{"arc",lua_arc},{"disc",lua_disc},{"glyph",lua_glyph},{"shift",lua_shift},{"line",lua_line},{"commit",lua_commit},{"status",lua_status},{"version",lua_version}};
+        {"ring",lua_ring},{"arc",lua_arc},{"disc",lua_disc},{"glyph",lua_glyph},{"shift",lua_shift},{"line",lua_line},
+        {"shield",lua_shield},{"hex",lua_hex},{"commit",lua_commit},{"status",lua_status},{"version",lua_version}};
     for(auto const& e:entries){g_lua.pushcclosure(L,e.fn,0);g_lua.setfield(L,-2,e.name);}
     return 1;
 }

@@ -19,11 +19,18 @@ jobs:
           for f in *.lua tests/*.lua; do luac5.1 -p "$f"; done
           lua5.1 tests/test_wards.lua
           lua5.1 tests/test_debuffs.lua
-      - name: Native 0.15.2 builds from native/; shipped DLL is a 0.15.2 renderer
+      - name: Native 0.16.0 builds from native/; shipped DLL is a 0.16.0 renderer
         run: |
           i686-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -shared -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp -o /tmp/_Wards.dll native/TargetSC.cpp native/exports.def -ld3d8
           g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/property native/tests/test_property.cpp && /tmp/property
           g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/stroke native/tests/test_stroke.cpp && /tmp/stroke
           g++ -m32 -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -o /tmp/thunk native/tests/test_thunk.cpp && /tmp/thunk
-          i686-w64-mingw32-objdump -p libs/_Wards.dll | grep -q 'luaopen__TargetSC'
-          grep -aq 'TargetSC 0.15.2' libs/_Wards.dll
+          i686-w64-mingw32-objdump -p /tmp/_Wards.dll | grep -q 'luaopen__TargetSC'
+          grep -aq 'TargetSC 0.16.0' /tmp/_Wards.dll
+          g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -o /tmp/shield native/tests/test_shield.cpp && /tmp/shield
+      - name: Upload Wards native renderer
+        uses: actions/upload-artifact@v4
+        with:
+          name: wards-native-0.16.0
+          path: /tmp/_Wards.dll
+          if-no-files-found: error
